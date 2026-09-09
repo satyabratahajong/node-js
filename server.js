@@ -1,80 +1,115 @@
 import express from 'express';
 
 const app = express();
-const PORT = 3000;
+const PORT = 3001; // different port from project 1
 
-// Middleware to parse JSON bodies
 app.use(express.json());
 
 // In-memory "database"
-let items = [
-  { id: 1, name: 'Item One', description: 'First item' },
-  { id: 2, name: 'Item Two', description: 'Second item' }
+let tasks = [
+  {
+    id: 1,
+    title: 'Learn Node.js',
+    description: 'Build a simple REST API',
+    completed: false,
+    dueDate: '2026-09-20'
+  },
+  {
+    id: 2,
+    title: 'Practice SQL',
+    description: 'Employee records and aggregation',
+    completed: true,
+    dueDate: '2026-09-15'
+  }
 ];
 let nextId = 3;
 
-// GET /items - list all items
-app.get('/items', (req, res) => {
-  res.json(items);
-});
+// GET /tasks - list tasks with optional filtering & sorting
+app.get('/tasks', (req, res) => {
+  const { completed, sort } = req.query;
 
-// GET /items/:id - get one item by id
-app.get('/items/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const item = items.find(i => i.id === id);
+  let result = [...tasks];
 
-  if (!item) {
-    return res.status(404).json({ error: 'Item not found' });
+  // Filter by completed (true/false)
+  if (completed !== undefined) {
+    const completedBool = completed === 'true';
+    result = result.filter(t => t.completed === completedBool);
   }
 
-  res.json(item);
-});
-
-// POST /items - create a new item
-app.post('/items', (req, res) => {
-  const { name, description } = req.body;
-
-  if (!name || !description) {
-    return res.status(400).json({ error: 'name and description are required' });
+  // Sort by dueDate or title
+  if (sort === 'dueDate') {
+    result.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+  } else if (sort === 'title') {
+    result.sort((a, b) => a.title.localeCompare(b.title));
   }
 
-  const newItem = { id: nextId++, name, description };
-  items.push(newItem);
-
-  res.status(201).json(newItem);
+  res.json(result);
 });
 
-// PUT /items/:id - update an existing item
-app.put('/items/:id', (req, res) => {
+// GET /tasks/:id - get one task
+app.get('/tasks/:id', (req, res) => {
   const id = Number(req.params.id);
-  const { name, description } = req.body;
+  const task = tasks.find(t => t.id === id);
 
-  const item = items.find(i => i.id === id);
-
-  if (!item) {
-    return res.status(404).json({ error: 'Item not found' });
+  if (!task) {
+    return res.status(404).json({ error: 'Task not found' });
   }
 
-  if (name) item.name = name;
-  if (description) item.description = description;
-
-  res.json(item);
+  res.json(task);
 });
 
-// DELETE /items/:id - delete an item
-app.delete('/items/:id', (req, res) => {
+// POST /tasks - create a new task
+app.post('/tasks', (req, res) => {
+  const { title, description, dueDate } = req.body;
+
+  if (!title) {
+    return res.status(400).json({ error: 'title is required' });
+  }
+
+  const newTask = {
+    id: nextId++,
+    title,
+    description: description || '',
+    completed: false,
+    dueDate: dueDate || null
+  };
+
+  tasks.push(newTask);
+  res.status(201).json(newTask);
+});
+
+// PUT /tasks/:id - update a task
+app.put('/tasks/:id', (req, res) => {
   const id = Number(req.params.id);
-  const index = items.findIndex(i => i.id === id);
+  const { title, description, completed, dueDate } = req.body;
+
+  const task = tasks.find(t => t.id === id);
+
+  if (!task) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+
+  if (title !== undefined) task.title = title;
+  if (description !== undefined) task.description = description;
+  if (completed !== undefined) task.completed = Boolean(completed);
+  if (dueDate !== undefined) task.dueDate = dueDate;
+
+  res.json(task);
+});
+
+// DELETE /tasks/:id - delete a task
+app.delete('/tasks/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const index = tasks.findIndex(t => t.id === id);
 
   if (index === -1) {
-    return res.status(404).json({ error: 'Item not found' });
+    return res.status(404).json({ error: 'Task not found' });
   }
 
-  const deleted = items.splice(index, 1)[0];
+  const deleted = tasks.splice(index, 1)[0];
   res.json(deleted);
 });
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`Todo API running at http://localhost:${PORT}`);
 });
