@@ -1,49 +1,80 @@
-//pool with undici
-import { Pool } from 'undici';
+import express from 'express';
 
-const ollamaPool = new Pool('http://localhost:11434', {
-  connections: 10,
+const app = express();
+const PORT = 3000;
+
+// Middleware to parse JSON bodies
+app.use(express.json());
+
+// In-memory "database"
+let items = [
+  { id: 1, name: 'Item One', description: 'First item' },
+  { id: 2, name: 'Item Two', description: 'Second item' }
+];
+let nextId = 3;
+
+// GET /items - list all items
+app.get('/items', (req, res) => {
+  res.json(items);
 });
 
-/**
- * Stream the completion of a prompt using the Ollama API.
- * @param {string} prompt - The prompt to complete.
- * @link https://github.com/ollama/ollama/blob/main/docs/api.md
- **/
-async function streamOllamaCompletion(prompt) {
-  const { statusCode, body } = await ollamaPool.request({
-    path: '/api/generate',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ prompt, model: 'mistral' }),
-  });
+// GET /items/:id - get one item by id
+app.get('/items/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const item = items.find(i => i.id === id);
 
-  // You can read about HTTP status codes here: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status
-  // 200 means the request was successful.
-  if (statusCode !== 200) {
-    // consuming the response body is mandatory: https://undici.nodejs.org/#/?id=garbage-collection
-    await body.dump();
-    throw new Error(`Ollama request failed with status ${statusCode}`);
+  if (!item) {
+    return res.status(404).json({ error: 'Item not found' });
   }
 
-  let partial = '';
+  res.json(item);
+});
 
-  const decoder = new TextDecoder();
-  for await (const chunk of body) {
-    partial += decoder.decode(chunk, { stream: true });
-    console.log(partial);
+// POST /items - create a new item
+app.post('/items', (req, res) => {
+  const { name, description } = req.body;
+
+  if (!name || !description) {
+    return res.status(400).json({ error: 'name and description are required' });
   }
 
-  console.log('Streaming complete.');
-}
+  const newItem = { id: nextId++, name, description };
+  items.push(newItem);
 
-try {
-  await streamOllamaCompletion('What is recursion?');
-} catch (error) {
-  console.error('Error calling Ollama:', error);
-} finally {
-  console.log('Closing Ollama pool.');
-  ollamaPool.close();
-}
+  res.status(201).json(newItem);
+});
+
+// PUT /items/:id - update an existing item
+app.put('/items/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const { name, description } = req.body;
+
+  const item = items.find(i => i.id === id);
+
+  if (!item) {
+    return res.status(404).json({ error: 'Item not found' });
+  }
+
+  if (name) item.name = name;
+  if (description) item.description = description;
+
+  res.json(item);
+});
+
+// DELETE /items/:id - delete an item
+app.delete('/items/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const index = items.findIndex(i => i.id === id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Item not found' });
+  }
+
+  const deleted = items.splice(index, 1)[0];
+  res.json(deleted);
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});
