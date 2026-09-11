@@ -1,126 +1,88 @@
 import express from 'express';
 
 const app = express();
-const PORT = 3004;
+const PORT = 3005;
 
 app.use(express.json());
 
 // In-memory "DB"
-let expenses = [
-  { id: 1, description: 'Groceries', amount: 1200, category: 'food', date: '2026-09-01' },
-  { id: 2, description: 'Bus pass', amount: 300, category: 'transport', date: '2026-09-03' }
+const readings = [
+  { id: 1, deviceId: 'esp32_1', temperature: 27.3, humidity: 60.1, recordedAt: new Date().toISOString() },
+  { id: 2, deviceId: 'esp32_1', temperature: 27.5, humidity: 59.8, recordedAt: new Date().toISOString() }
 ];
 let nextId = 3;
 
-// GET /expenses
-app.get('/expenses', (req, res) => {
-  const { category, from, to } = req.query;
+// POST /readings (from device)
+app.post('/readings', (req, res) => {
+  const { deviceId, temperature, humidity, recordedAt } = req.body;
 
-  let result = [...expenses];
+  if (!deviceId || temperature == null || humidity == null) {
+    return res.status(400).json({ error: 'deviceId, temperature, and humidity are required' });
+  }
 
-  if (category) {
-    result = result.filter(e => e.category === category);
+  const reading = {
+    id: nextId++,
+    deviceId,
+    temperature: Number(temperature),
+    humidity: Number(humidity),
+    recordedAt: recordedAt || new Date().toISOString()
+  };
+
+  readings.push(reading);
+  res.status(201).json(reading);
+});
+
+// GET /readings
+app.get('/readings', (req, res) => {
+  const { deviceId, from, to, limit } = req.query;
+
+  let result = [...readings];
+
+  if (deviceId) {
+    result = result.filter(r => r.deviceId === deviceId);
   }
   if (from) {
-    result = result.filter(e => e.date >= from);
+    result = result.filter(r => r.recordedAt >= from);
   }
   if (to) {
-    result = result.filter(e => e.date <= to);
+    result = result.filter(r => r.recordedAt <= to);
   }
+
+  const limitNum = limit ? Number(limit) : result.length;
+  result = result.slice(0, limitNum);
 
   res.json(result);
 });
 
-// GET /expenses/summary
-app.get('/expenses/summary', (req, res) => {
-  const { from, to, groupBy } = req.query;
+// GET /stats/avg
+app.get('/stats/avg', (req, res) => {
+  const { deviceId, from, to, group } = req.query;
 
-  let result = [...expenses];
+  let result = [...readings];
 
+  if (deviceId) {
+    result = result.filter(r => r.deviceId === deviceId);
+  }
   if (from) {
-    result = result.filter(e => e.date >= from);
+    result = result.filter(r => r.recordedAt >= from);
   }
   if (to) {
-    result = result.filter(e => e.date <= to);
+    result = result.filter(r => r.recordedAt <= to);
   }
 
-  const total = result.reduce((sum, e) => sum + e.amount, 0);
-
-  let grouped = null;
-  if (groupBy === 'category') {
-    const map = new Map();
-    for (const e of result) {
-      map.set(e.category, (map.get(e.category) || 0) + e.amount);
-    }
-    grouped = Object.fromEntries(map);
+  if (result.length === 0) {
+    return res.json({ count: 0, avgTemperature: null, avgHumidity: null });
   }
 
-  res.json({ total, from: from || null, to: to || null, grouped });
-});
+  const count = result.length;
+  const avgTemperature = result.reduce((s, r) => s + r.temperature, 0) / count;
+  const avgHumidity = result.reduce((s, r) => s + r.humidity, 0) / count;
 
-// GET /expenses/:id
-app.get('/expenses/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const expense = expenses.find(e => e.id === id);
-
-  if (!expense) {
-    return res.status(404).json({ error: 'Expense not found' });
-  }
-
-  res.json(expense);
-});
-
-// POST /expenses
-app.post('/expenses', (req, res) => {
-  const { description, amount, category, date } = req.body;
-
-  if (!description || amount == null || !category || !date) {
-    return res.status(400).json({ error: 'description, amount, category, and date are required' });
-  }
-
-  const expense = {
-    id: nextId++,
-    description,
-    amount: Number(amount),
-    category,
-    date
-  };
-
-  expenses.push(expense);
-  res.status(201).json(expense);
-});
-
-// PUT /expenses/:id
-app.put('/expenses/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const { description, amount, category, date } = req.body;
-
-  const expense = expenses.find(e => e.id === id);
-  if (!expense) {
-    return res.status(404).json({ error: 'Expense not found' });
-  }
-
-  if (description !== undefined) expense.description = description;
-  if (amount !== undefined) expense.amount = Number(amount);
-  if (category !== undefined) expense.category = category;
-  if (date !== undefined) expense.date = date;
-
-  res.json(expense);
-});
-
-// DELETE /expenses/:id
-app.delete('/expenses/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const index = expenses.findIndex(e => e.id === id);
-
-  if (index === -1) {
-    return res.status(404).json({ error: 'Expense not found' });
-  }
-
-  const deleted = expenses.splice(index, 1)[0];
-  res.json(deleted);
+  // Very simple grouping: "hour" or "day" just returns overall avg for now
+  // You can extend this later to group by hour/day properly.
+  res.json({ count, avgTemperature, avgHumidity, group: group || null });
 });
 
 app.listen(PORT, () => {
-  console.log(`Expense Tracker API running at http://localhost:${PORT}`);
+  console.log(`IoT Sensor API running at http://localhost:${PORT}`);
 });
