@@ -1,153 +1,104 @@
 import express from 'express';
 
 const app = express();
-const PORT = 3010;
+const PORT = 3011;
 
 app.use(express.json());
 
 // In-memory "DB"
-const posts = [];   // { id, title, content, createdAt }
-const comments = []; // { id, postId, author, content, createdAt }
-let nextPostId = 1;
-let nextCommentId = 1;
+const urls = []; // { id, shortCode, originalUrl, clicks, lastClickedAt }
+let nextId = 1;
 
-// ---------- Posts ----------
+// Simple short code generator
+function generateShortCode() {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
 
-// GET /posts
-app.get('/posts', (req, res) => {
-  const list = posts.map(p => ({
-    ...p,
-    commentCount: comments.filter(c => c.postId === p.id).length
-  }));
-  res.json(list);
-});
+// POST /shorten
+app.post('/shorten', (req, res) => {
+  const { originalUrl } = req.body;
 
-// GET /posts/:id
-app.get('/posts/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const post = posts.find(p => p.id === id);
-  if (!post) {
-    return res.status(404).json({ error: 'Post not found' });
+  if (!originalUrl) {
+    return res.status(400).json({ error: 'originalUrl is required' });
   }
 
-  const postComments = comments.filter(c => c.postId === id);
-  res.json({ ...post, comments: postComments });
-});
-
-// POST /posts
-app.post('/posts', (req, res) => {
-  const { title, content } = req.body;
-  if (!title) {
-    return res.status(400).json({ error: 'title is required' });
+  // Optional: basic URL validation
+  let parsed;
+  try {
+    parsed = new URL(originalUrl);
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
   }
 
-  const post = {
-    id: nextPostId++,
-    title,
-    content: content || '',
-    createdAt: new Date().toISOString()
+  let shortCode = generateShortCode();
+  while (urls.find(u => u.shortCode === shortCode)) {
+    shortCode = generateShortCode();
+  }
+
+  const entry = {
+    id: nextId++,
+    shortCode,
+    originalUrl,
+    clicks: 0,
+    lastClickedAt: null
   };
 
-  posts.push(post);
-  res.status(201).json(post);
+  urls.push(entry);
+
+  const shortUrl = `http://localhost:${PORT}/s/${shortCode}`;
+  res.status(201).json({ originalUrl, shortCode, shortUrl });
 });
 
-// PUT /posts/:id
-app.put('/posts/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const { title, content } = req.body;
+// GET /s/:code (redirect)
+app.get('/s/:code', (req, res) => {
+  const { code } = req.params;
+  const entry = urls.find(u => u.shortCode === code);
 
-  const post = posts.find(p => p.id === id);
-  if (!post) {
-    return res.status(404).json({ error: 'Post not found' });
+  if (!entry) {
+    return res.status(404).json({ error: 'Short URL not found' });
   }
 
-  if (title !== undefined) post.title = title;
-  if (content !== undefined) post.content = content;
+  entry.clicks += 1;
+  entry.lastClickedAt = new Date().toISOString();
 
-  res.json(post);
+  // Redirect to original URL
+  res.redirect(entry.originalUrl);
 });
 
-// DELETE /posts/:id
-app.delete('/posts/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const index = posts.findIndex(p => p.id === id);
+// GET /stats/:code
+app.get('/stats/:code', (req, res) => {
+  const { code } = req.params;
+  const entry = urls.find(u => u.shortCode === code);
 
-  if (index === -1) {
-    return res.status(404).json({ error: 'Post not found' });
+  if (!entry) {
+    return res.status(404).json({ error: 'Short URL not found' });
   }
 
-  // Also delete related comments
-  const deletedPost = posts.splice(index, 1)[0];
-  const indices = comments
-    .map((c, i) => (c.postId === id ? i : -1))
-    .filter(i => i !== -1)
-    .sort((a, b) => b - a);
-
-  for (const i of indices) {
-    comments.splice(i, 1);
-  }
-
-  res.json(deletedPost);
+  res.json({
+    shortCode: entry.shortCode,
+    originalUrl: entry.originalUrl,
+    clicks: entry.clicks,
+    lastClickedAt: entry.lastClickedAt
+  });
 });
 
-// ---------- Comments ----------
-
-// POST /posts/:postId/comments
-app.post('/posts/:postId/comments', (req, res) => {
-  const postId = Number(req.params.postId);
-  const { author, content } = req.body;
-
-  const post = posts.find(p => p.id === postId);
-  if (!post) {
-    return res.status(404).json({ error: 'Post not found' });
-  }
-
-  if (!content) {
-    return res.status(400).json({ error: 'content is required' });
-  }
-
-  const comment = {
-    id: nextCommentId++,
-    postId,
-    author: author || 'Anonymous',
-    content,
-    createdAt: new Date().toISOString()
-  };
-
-  comments.push(comment);
-  res.status(201).json(comment);
-});
-
-// PUT /comments/:id
-app.put('/comments/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const { author, content } = req.body;
-
-  const comment = comments.find(c => c.id === id);
-  if (!comment) {
-    return res.status(404).json({ error: 'Comment not found' });
-  }
-
-  if (author !== undefined) comment.author = author;
-  if (content !== undefined) comment.content = content;
-
-  res.json(comment);
-});
-
-// DELETE /comments/:id
-app.delete('/comments/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const index = comments.findIndex(c => c.id === id);
-
-  if (index === -1) {
-    return res.status(404).json({ error: 'Comment not found' });
-  }
-
-  const deleted = comments.splice(index, 1)[0];
-  res.json(deleted);
+// GET /urls (list all)
+app.get('/urls', (req, res) => {
+  res.json(
+    urls.map(u => ({
+      shortCode: u.shortCode,
+      originalUrl: u.originalUrl,
+      clicks: u.clicks,
+      lastClickedAt: u.lastClickedAt
+    }))
+  );
 });
 
 app.listen(PORT, () => {
-  console.log(`Blog API running at http://localhost:${PORT}`);
+  console.log(`URL Shortener API running at http://localhost:${PORT}`);
 });
