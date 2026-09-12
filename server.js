@@ -1,141 +1,139 @@
 import express from 'express';
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
 
 const app = express();
-const PORT = 3022;
-const JWT_SECRET = 'change-me-to-a-strong-random-string';
-const ACCESS_EXP = '15m';
-const REFRESH_EXP = '7d';
+const PORT = 3030;
 
 app.use(express.json());
 
-// In-memory "DB"
-const users = []; // { id, email, passwordHash, refreshToken? }
-let nextId = 1;
+// Quick in-memory store
+const books = [
+  { id: 1, title: 'Clean Code', author: 'Robert C. Martin', year: 2008, available: true },
+  { id: 2, title: 'The Pragmatic Programmer', author: 'Andrew Hunt', year: 1999, available: true }
+];
+let nextId = 3;
 
-// POST /auth/register
-app.post('/auth/register', async (req, res) => {
-  const { email, password } = req.body;
+// List books, optional filters: ?title=...&author=...&available=true/false
+app.get('/books', (req, res) => {
+  const { title, author, available } = req.query;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'email and password are required' });
+  let result = [...books];
+
+  if (title) {
+    result = result.filter(b =>
+      b.title.toLowerCase().includes(title.toLowerCase())
+    );
   }
 
-  if (users.find(u => u.email === email)) {
-    return res.status(400).json({ error: 'Email already exists' });
+  if (author) {
+    result = result.filter(b =>
+      b.author.toLowerCase().includes(author.toLowerCase())
+    );
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
-  const user = { id: nextId++, email, passwordHash };
-  users.push(user);
+  if (available !== undefined) {
+    const flag = available === 'true';
+    result = result.filter(b => b.available === flag);
+  }
 
-  res.status(201).json({ id: user.id, email: user.email });
+  res.json(result);
 });
 
-// POST /auth/login
-app.post('/auth/login', async (req, res) => {
-  const { email, password } = req.body;
+// Get one book
+app.get('/books/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const book = books.find(b => b.id === id);
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'email and password are required' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
 
-  const user = users.find(u => u.email === email);
-  if (!user) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const ok = await bcrypt.compare(password, user.passwordHash);
-  if (!ok) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const accessToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: ACCESS_EXP });
-  const refreshToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: REFRESH_EXP });
-
-  user.refreshToken = refreshToken;
-
-  res.json({
-    accessToken,
-    refreshToken,
-    userId: user.id,
-    email: user.email
-  });
+  res.json(book);
 });
 
-// POST /auth/refresh
-app.post('/auth/refresh', (req, res) => {
-  const { refreshToken } = req.body;
+// Add a book
+app.post('/books', (req, res) => {
+  const { title, author, year, available } = req.body;
 
-  if (!refreshToken) {
-    return res.status(400).json({ error: 'refreshToken is required' });
+  if (!title || !author) {
+    return res.status(400).json({ error: 'title and author are required' });
   }
 
-  try {
-    const payload = jwt.verify(refreshToken, JWT_SECRET);
-    const user = users.find(u => u.id === payload.userId && u.refreshToken === refreshToken);
+  const book = {
+    id: nextId++,
+    title,
+    author,
+    year: year ? Number(year) : null,
+    available: available !== undefined ? Boolean(available) : true
+  };
 
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid refresh token' });
-    }
-
-    const newAccessToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: ACCESS_EXP });
-    const newRefreshToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: REFRESH_EXP });
-
-    user.refreshToken = newRefreshToken;
-
-    res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
-  } catch {
-    return res.status(401).json({ error: 'Invalid refresh token' });
-  }
+  books.push(book);
+  res.status(201).json(book);
 });
 
-// GET /auth/me (requires access token)
-app.get('/auth/me', (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing or invalid token' });
+// Update a book
+app.put('/books/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const { title, author, year, available } = req.body;
+
+  const book = books.find(b => b.id === id);
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
 
-  const token = authHeader.split(' ')[1];
+  if (title !== undefined) book.title = title;
+  if (author !== undefined) book.author = author;
+  if (year !== undefined) book.year = Number(year);
+  if (available !== undefined) book.available = Boolean(available);
 
-  try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    const user = users.find(u => u.id === payload.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    res.json({ id: user.id, email: user.email });
-  } catch {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
+  res.json(book);
 });
 
-// POST /auth/logout
-app.post('/auth/logout', (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing or invalid token' });
+// Delete a book
+app.delete('/books/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const index = books.findIndex(b => b.id === id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Book not found' });
   }
 
-  const token = authHeader.split(' ')[1];
+  const deleted = books.splice(index, 1)[0];
+  res.json(deleted);
+});
 
-  try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    const user = users.find(u => u.id === payload.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+// Mark a book as borrowed / returned
+app.patch('/books/:id/borrow', (req, res) => {
+  const id = Number(req.params.id);
+  const book = books.find(b => b.id === id);
 
-    user.refreshToken = null;
-    res.json({ message: 'Logged out' });
-  } catch {
-    return res.status(401).json({ error: 'Invalid token' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
+
+  if (!book.available) {
+    return res.status(400).json({ error: 'Book is already borrowed' });
+  }
+
+  book.available = false;
+  res.json(book);
+});
+
+app.patch('/books/:id/return', (req, res) => {
+  const id = Number(req.params.id);
+  const book = books.find(b => b.id === id);
+
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  if (book.available) {
+    return res.status(400).json({ error: 'Book is already returned' });
+  }
+
+  book.available = true;
+  res.json(book);
 });
 
 app.listen(PORT, () => {
-  console.log(`Auth Service running at http://localhost:${PORT}`);
+  console.log(`Library API running at http://localhost:${PORT}`);
 });
