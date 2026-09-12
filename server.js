@@ -1,88 +1,153 @@
 import express from 'express';
 
 const app = express();
-const PORT = 3005;
+const PORT = 3010;
 
 app.use(express.json());
 
 // In-memory "DB"
-const readings = [
-  { id: 1, deviceId: 'esp32_1', temperature: 27.3, humidity: 60.1, recordedAt: new Date().toISOString() },
-  { id: 2, deviceId: 'esp32_1', temperature: 27.5, humidity: 59.8, recordedAt: new Date().toISOString() }
-];
-let nextId = 3;
+const posts = [];   // { id, title, content, createdAt }
+const comments = []; // { id, postId, author, content, createdAt }
+let nextPostId = 1;
+let nextCommentId = 1;
 
-// POST /readings (from device)
-app.post('/readings', (req, res) => {
-  const { deviceId, temperature, humidity, recordedAt } = req.body;
+// ---------- Posts ----------
 
-  if (!deviceId || temperature == null || humidity == null) {
-    return res.status(400).json({ error: 'deviceId, temperature, and humidity are required' });
+// GET /posts
+app.get('/posts', (req, res) => {
+  const list = posts.map(p => ({
+    ...p,
+    commentCount: comments.filter(c => c.postId === p.id).length
+  }));
+  res.json(list);
+});
+
+// GET /posts/:id
+app.get('/posts/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const post = posts.find(p => p.id === id);
+  if (!post) {
+    return res.status(404).json({ error: 'Post not found' });
   }
 
-  const reading = {
-    id: nextId++,
-    deviceId,
-    temperature: Number(temperature),
-    humidity: Number(humidity),
-    recordedAt: recordedAt || new Date().toISOString()
+  const postComments = comments.filter(c => c.postId === id);
+  res.json({ ...post, comments: postComments });
+});
+
+// POST /posts
+app.post('/posts', (req, res) => {
+  const { title, content } = req.body;
+  if (!title) {
+    return res.status(400).json({ error: 'title is required' });
+  }
+
+  const post = {
+    id: nextPostId++,
+    title,
+    content: content || '',
+    createdAt: new Date().toISOString()
   };
 
-  readings.push(reading);
-  res.status(201).json(reading);
+  posts.push(post);
+  res.status(201).json(post);
 });
 
-// GET /readings
-app.get('/readings', (req, res) => {
-  const { deviceId, from, to, limit } = req.query;
+// PUT /posts/:id
+app.put('/posts/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const { title, content } = req.body;
 
-  let result = [...readings];
-
-  if (deviceId) {
-    result = result.filter(r => r.deviceId === deviceId);
-  }
-  if (from) {
-    result = result.filter(r => r.recordedAt >= from);
-  }
-  if (to) {
-    result = result.filter(r => r.recordedAt <= to);
+  const post = posts.find(p => p.id === id);
+  if (!post) {
+    return res.status(404).json({ error: 'Post not found' });
   }
 
-  const limitNum = limit ? Number(limit) : result.length;
-  result = result.slice(0, limitNum);
+  if (title !== undefined) post.title = title;
+  if (content !== undefined) post.content = content;
 
-  res.json(result);
+  res.json(post);
 });
 
-// GET /stats/avg
-app.get('/stats/avg', (req, res) => {
-  const { deviceId, from, to, group } = req.query;
+// DELETE /posts/:id
+app.delete('/posts/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const index = posts.findIndex(p => p.id === id);
 
-  let result = [...readings];
-
-  if (deviceId) {
-    result = result.filter(r => r.deviceId === deviceId);
-  }
-  if (from) {
-    result = result.filter(r => r.recordedAt >= from);
-  }
-  if (to) {
-    result = result.filter(r => r.recordedAt <= to);
+  if (index === -1) {
+    return res.status(404).json({ error: 'Post not found' });
   }
 
-  if (result.length === 0) {
-    return res.json({ count: 0, avgTemperature: null, avgHumidity: null });
+  // Also delete related comments
+  const deletedPost = posts.splice(index, 1)[0];
+  const indices = comments
+    .map((c, i) => (c.postId === id ? i : -1))
+    .filter(i => i !== -1)
+    .sort((a, b) => b - a);
+
+  for (const i of indices) {
+    comments.splice(i, 1);
   }
 
-  const count = result.length;
-  const avgTemperature = result.reduce((s, r) => s + r.temperature, 0) / count;
-  const avgHumidity = result.reduce((s, r) => s + r.humidity, 0) / count;
+  res.json(deletedPost);
+});
 
-  // Very simple grouping: "hour" or "day" just returns overall avg for now
-  // You can extend this later to group by hour/day properly.
-  res.json({ count, avgTemperature, avgHumidity, group: group || null });
+// ---------- Comments ----------
+
+// POST /posts/:postId/comments
+app.post('/posts/:postId/comments', (req, res) => {
+  const postId = Number(req.params.postId);
+  const { author, content } = req.body;
+
+  const post = posts.find(p => p.id === postId);
+  if (!post) {
+    return res.status(404).json({ error: 'Post not found' });
+  }
+
+  if (!content) {
+    return res.status(400).json({ error: 'content is required' });
+  }
+
+  const comment = {
+    id: nextCommentId++,
+    postId,
+    author: author || 'Anonymous',
+    content,
+    createdAt: new Date().toISOString()
+  };
+
+  comments.push(comment);
+  res.status(201).json(comment);
+});
+
+// PUT /comments/:id
+app.put('/comments/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const { author, content } = req.body;
+
+  const comment = comments.find(c => c.id === id);
+  if (!comment) {
+    return res.status(404).json({ error: 'Comment not found' });
+  }
+
+  if (author !== undefined) comment.author = author;
+  if (content !== undefined) comment.content = content;
+
+  res.json(comment);
+});
+
+// DELETE /comments/:id
+app.delete('/comments/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const index = comments.findIndex(c => c.id === id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Comment not found' });
+  }
+
+  const deleted = comments.splice(index, 1)[0];
+  res.json(deleted);
 });
 
 app.listen(PORT, () => {
-  console.log(`IoT Sensor API running at http://localhost:${PORT}`);
+  console.log(`Blog API running at http://localhost:${PORT}`);
 });
