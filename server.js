@@ -1,104 +1,136 @@
 import express from 'express';
 
 const app = express();
-const PORT = 3011;
+const PORT = 3012;
 
 app.use(express.json());
 
 // In-memory "DB"
-const urls = []; // { id, shortCode, originalUrl, clicks, lastClickedAt }
+const devices = new Map(); // deviceId -> { lastSeen, lastData }
+const readings = [];       // { id, deviceId, temperature, humidity, recordedAt }
 let nextId = 1;
 
-// Simple short code generator
-function generateShortCode() {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let code = '';
-  for (let i = 0; i < 6; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+function ensureDevice(deviceId) {
+  if (!devices.has(deviceId)) {
+    devices.set(deviceId, {
+      deviceId,
+      lastSeen: null,
+      lastData: null
+    });
   }
-  return code;
 }
 
-// POST /shorten
-app.post('/shorten', (req, res) => {
-  const { originalUrl } = req.body;
+// POST /readings (from device)
+app.post('/readings', (req, res) => {
+  const { deviceId, temperature, humidity, recordedAt } = req.body;
 
-  if (!originalUrl) {
-    return res.status(400).json({ error: 'originalUrl is required' });
+  if (!deviceId || temperature == null || humidity == null) {
+    return res.status(400).json({ error: 'deviceId, temperature, and humidity are required' });
   }
 
-  // Optional: basic URL validation
-  let parsed;
-  try {
-    parsed = new URL(originalUrl);
-  } catch {
-    return res.status(400).json({ error: 'Invalid URL' });
-  }
+  ensureDevice(deviceId);
 
-  let shortCode = generateShortCode();
-  while (urls.find(u => u.shortCode === shortCode)) {
-    shortCode = generateShortCode();
-  }
+  const device = devices.get(deviceId);
+  const now = recordedAt || new Date().toISOString();
 
-  const entry = {
+  device.lastSeen = now;
+  device.lastData = { temperature: Number(temperature), humidity: Number(humidity) };
+
+  const reading = {
     id: nextId++,
-    shortCode,
-    originalUrl,
-    clicks: 0,
-    lastClickedAt: null
+    deviceId,
+    temperature: Number(temperature),
+    humidity: Number(humidity),
+    recordedAt: now
   };
 
-  urls.push(entry);
+  readings.push(reading);
 
-  const shortUrl = `http://localhost:${PORT}/s/${shortCode}`;
-  res.status(201).json({ originalUrl, shortCode, shortUrl });
+  res.status(201).json(reading);
 });
 
-// GET /s/:code (redirect)
-app.get('/s/:code', (req, res) => {
-  const { code } = req.params;
-  const entry = urls.find(u => u.shortCode === code);
+// GET /devices
+app.get('/devices', (req, res) => {
+  const list = Array.from(devices.values()).map(d => ({
+    deviceId: d.deviceId,
+    lastSeen: d.lastSeen,
+    lastTemperature: d.lastData?.temperature ?? null,
+    lastHumidity: d.lastData?.humidity ?? null,
+    totalReadings: readings.filter(r => r.deviceId === d.deviceId).length
+  }));
 
-  if (!entry) {
-    return res.status(404).json({ error: 'Short URL not found' });
-  }
-
-  entry.clicks += 1;
-  entry.lastClickedAt = new Date().toISOString();
-
-  // Redirect to original URL
-  res.redirect(entry.originalUrl);
+  res.json(list);
 });
 
-// GET /stats/:code
-app.get('/stats/:code', (req, res) => {
-  const { code } = req.params;
-  const entry = urls.find(u => u.shortCode === code);
+// GET /readings
+app.get('/readings', (req, res) => {
+  const { deviceId, limit } = req.query;
 
-  if (!entry) {
-    return res.status(404).json({ error: 'Short URL not found' });
+  let result = [...readings];
+
+  if (deviceId) {
+    result = result.filter(r => r.deviceId === deviceId);
   }
+
+  const limitNum = limit ? Number(limit) : 50;
+  result = result.slice(-limitNum); // last N readings
+
+  res.json(result);
+});
+
+// GET /live (simple "latest snapshot" for dashboard)
+app.get('/live', (req, res) => {
+  const snapshot = Array.from(devices.values()).map(d => ({
+    deviceId: d.deviceId,
+    lastSeen: d.lastSeen,
+    temperature: d.lastData?.temperature ?? null,
+    humidity: d.lastData?.humidity ?? null
+  }));
 
   res.json({
-    shortCode: entry.shortCode,
-    originalUrl: entry.originalUrl,
-    clicks: entry.clicks,
-    lastClickedAt: entry.lastClickedAt
+    updatedAt: new Date().toISOString(),
+    devices: snapshot
   });
 });
 
-// GET /urls (list all)
-app.get('/urls', (req, res) => {
-  res.json(
-    urls.map(u => ({
-      shortCode: u.shortCode,
-      originalUrl: u.originalUrl,
-      clicks: u.clicks,
-      lastClickedAt: u.lastClickedAt
-    }))
-  );
+// GET /stats/:deviceId
+app.get('/stats/:deviceId', (req, res) => {
+  const { deviceId } = req.params;
+
+  const deviceReadings = readings.filter(r => r.deviceId === deviceId);
+
+  if (deviceReadings.length === 0) {
+    return res.json({
+      deviceId,
+      count: 0,
+      avgTemperature: null,
+      avgHumidity: null,
+      minTemperature: null,
+      maxTemperature: null,
+      minHumidity: null,
+      maxHumidity: null
+    });
+  }
+
+  const count = deviceReadings.length;
+  const avgTemperature = deviceReadings.reduce((s, r) => s + r.temperature, 0) / count;
+  const avgHumidity = deviceReadings.reduce((s, r) => s + r.humidity, 0) / count;
+
+  const temps = deviceReadings.map(r => r.temperature);
+  const hums = deviceReadings.map(r => r.humidity);
+
+  res.json({
+    deviceId,
+    count,
+    avgTemperature,
+    avgHumidity,
+    minTemperature: Math.min(...temps),
+    maxTemperature: Math.max(...temps),
+    minHumidity: Math.min(...hums),
+    maxHumidity: Math.max(...hums)
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`URL Shortener API running at http://localhost:${PORT}`);
+  console.log(`Sensor Dashboard API running at http://localhost:${PORT}`);
 });
