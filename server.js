@@ -1,243 +1,100 @@
 import express from 'express';
+import multer from 'multer';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = express();
-const PORT = 3020;
+const PORT = 3021;
+
+// Store files in ./uploads
+const uploadDir = join(__dirname, 'uploads');
+import { mkdirSync, existsSync } from 'fs';
+if (!existsSync(uploadDir)) {
+  mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, unique + '-' + file.originalname);
+  }
+});
+
+const upload = multer({ storage });
 
 app.use(express.json());
 
-// In-memory "DB"
-const boards = [];     // { id, title, createdAt }
-const lists = [];      // { id, boardId, title, position }
-const cards = [];      // { id, listId, title, description, position }
-let nextBoardId = 1;
-let nextListId = 1;
-let nextCardId = 1;
+// In-memory metadata
+const files = []; // { id, originalName, filename, mimetype, size, uploadedAt }
+let nextId = 1;
 
-// ---------- Boards ----------
-
-// GET /boards
-app.get('/boards', (req, res) => {
-  res.json(boards);
-});
-
-// GET /boards/:id
-app.get('/boards/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const board = boards.find(b => b.id === id);
-  if (!board) {
-    return res.status(404).json({ error: 'Board not found' });
+// POST /files (upload)
+app.post('/files', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
   }
 
-  const boardLists = lists
-    .filter(l => l.boardId === id)
-    .sort((a, b) => a.position - b.position)
-    .map(l => ({
-      ...l,
-      cards: cards
-        .filter(c => c.listId === l.id)
-        .sort((a, b) => a.position - b.position)
-    }));
-
-  res.json({ ...board, lists: boardLists });
-});
-
-// POST /boards
-app.post('/boards', (req, res) => {
-  const { title } = req.body;
-  if (!title) {
-    return res.status(400).json({ error: 'title is required' });
-  }
-
-  const board = {
-    id: nextBoardId++,
-    title,
-    createdAt: new Date().toISOString()
+  const meta = {
+    id: nextId++,
+    originalName: req.file.originalname,
+    filename: req.file.filename,
+    mimetype: req.file.mimetype,
+    size: req.file.size,
+    uploadedAt: new Date().toISOString()
   };
 
-  boards.push(board);
-  res.status(201).json(board);
+  files.push(meta);
+  res.status(201).json(meta);
 });
 
-// PUT /boards/:id
-app.put('/boards/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const { title } = req.body;
+// GET /files (list metadata)
+app.get('/files', (req, res) => {
+  res.json(files);
+});
 
-  const board = boards.find(b => b.id === id);
-  if (!board) {
-    return res.status(404).json({ error: 'Board not found' });
+// GET /files/:id (download)
+app.get('/files/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const meta = files.find(f => f.id === id);
+
+  if (!meta) {
+    return res.status(404).json({ error: 'File not found' });
   }
 
-  if (title !== undefined) board.title = title;
-
-  res.json(board);
+  const filePath = join(uploadDir, meta.filename);
+  res.download(filePath, meta.originalName);
 });
 
-// DELETE /boards/:id
-app.delete('/boards/:id', (req, res) => {
+// DELETE /files/:id
+app.delete('/files/:id', (req, res) => {
   const id = Number(req.params.id);
-  const index = boards.findIndex(b => b.id === id);
+  const index = files.findIndex(f => f.id === id);
 
   if (index === -1) {
-    return res.status(404).json({ error: 'Board not found' });
+    return res.status(404).json({ error: 'File not found' });
   }
 
-  // Delete related lists and cards
-  const deletedBoard = boards.splice(index, 1)[0];
+  const meta = files[index];
 
-  const listIds = lists.filter(l => l.boardId === id).map(l => l.id);
-  const li = lists
-    .map((l, i) => (l.boardId === id ? i : -1))
-    .filter(i => i !== -1)
-    .sort((a, b) => b - a);
-
-  for (const i of li) {
-    lists.splice(i, 1);
+  // Delete physical file
+  import { unlinkSync } from 'fs';
+  import { join } from 'path';
+  const filePath = join(uploadDir, meta.filename);
+  try {
+    unlinkSync(filePath);
+  } catch {
+    // ignore if missing
   }
 
-  const ci = cards
-    .map((c, i) => (listIds.includes(c.listId) ? i : -1))
-    .filter(i => i !== -1)
-    .sort((a, b) => b - a);
-
-  for (const i of ci) {
-    cards.splice(i, 1);
-  }
-
-  res.json(deletedBoard);
-});
-
-// ---------- Lists ----------
-
-// POST /boards/:boardId/lists
-app.post('/boards/:boardId/lists', (req, res) => {
-  const boardId = Number(req.params.boardId);
-  const { title } = req.body;
-
-  const board = boards.find(b => b.id === boardId);
-  if (!board) {
-    return res.status(404).json({ error: 'Board not found' });
-  }
-
-  if (!title) {
-    return res.status(400).json({ error: 'title is required' });
-  }
-
-  const maxPos = lists
-    .filter(l => l.boardId === boardId)
-    .reduce((max, l) => Math.max(max, l.position), -1);
-
-  const list = {
-    id: nextListId++,
-    boardId,
-    title,
-    position: maxPos + 1
-  };
-
-  lists.push(list);
-  res.status(201).json(list);
-});
-
-// PUT /lists/:id
-app.put('/lists/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const { title } = req.body;
-
-  const list = lists.find(l => l.id === id);
-  if (!list) {
-    return res.status(404).json({ error: 'List not found' });
-  }
-
-  if (title !== undefined) list.title = title;
-
-  res.json(list);
-});
-
-// DELETE /lists/:id
-app.delete('/lists/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const index = lists.findIndex(l => l.id === id);
-
-  if (index === -1) {
-    return res.status(404).json({ error: 'List not found' });
-  }
-
-  const deletedList = lists.splice(index, 1)[0];
-
-  // Delete related cards
-  const ci = cards
-    .map((c, i) => (c.listId === deletedList.id ? i : -1))
-    .filter(i => i !== -1)
-    .sort((a, b) => b - a);
-
-  for (const i of ci) {
-    cards.splice(i, 1);
-  }
-
-  res.json(deletedList);
-});
-
-// ---------- Cards ----------
-
-// POST /lists/:listId/cards
-app.post('/lists/:listId/cards', (req, res) => {
-  const listId = Number(req.params.listId);
-  const { title, description } = req.body;
-
-  const list = lists.find(l => l.id === listId);
-  if (!list) {
-    return res.status(404).json({ error: 'List not found' });
-  }
-
-  if (!title) {
-    return res.status(400).json({ error: 'title is required' });
-  }
-
-  const maxPos = cards
-    .filter(c => c.listId === listId)
-    .reduce((max, c) => Math.max(max, c.position), -1);
-
-  const card = {
-    id: nextCardId++,
-    listId,
-    title,
-    description: description || '',
-    position: maxPos + 1
-  };
-
-  cards.push(card);
-  res.status(201).json(card);
-});
-
-// PUT /cards/:id
-app.put('/cards/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const { title, description } = req.body;
-
-  const card = cards.find(c => c.id === id);
-  if (!card) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
-  if (title !== undefined) card.title = title;
-  if (description !== undefined) card.description = description;
-
-  res.json(card);
-});
-
-// DELETE /cards/:id
-app.delete('/cards/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const index = cards.findIndex(c => c.id === id);
-
-  if (index === -1) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
-  const deleted = cards.splice(index, 1)[0];
-  res.json(deleted);
+  files.splice(index, 1);
+  res.json(meta);
 });
 
 app.listen(PORT, () => {
-  console.log(`Project Board API running at http://localhost:${PORT}`);
+  console.log(`File Upload API running at http://localhost:${PORT}`);
 });
