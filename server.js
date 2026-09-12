@@ -1,100 +1,141 @@
 import express from 'express';
-import multer from 'multer';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 
 const app = express();
-const PORT = 3021;
-
-// Store files in ./uploads
-const uploadDir = join(__dirname, 'uploads');
-import { mkdirSync, existsSync } from 'fs';
-if (!existsSync(uploadDir)) {
-  mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, unique + '-' + file.originalname);
-  }
-});
-
-const upload = multer({ storage });
+const PORT = 3022;
+const JWT_SECRET = 'change-me-to-a-strong-random-string';
+const ACCESS_EXP = '15m';
+const REFRESH_EXP = '7d';
 
 app.use(express.json());
 
-// In-memory metadata
-const files = []; // { id, originalName, filename, mimetype, size, uploadedAt }
+// In-memory "DB"
+const users = []; // { id, email, passwordHash, refreshToken? }
 let nextId = 1;
 
-// POST /files (upload)
-app.post('/files', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
+// POST /auth/register
+app.post('/auth/register', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
   }
 
-  const meta = {
-    id: nextId++,
-    originalName: req.file.originalname,
-    filename: req.file.filename,
-    mimetype: req.file.mimetype,
-    size: req.file.size,
-    uploadedAt: new Date().toISOString()
-  };
-
-  files.push(meta);
-  res.status(201).json(meta);
-});
-
-// GET /files (list metadata)
-app.get('/files', (req, res) => {
-  res.json(files);
-});
-
-// GET /files/:id (download)
-app.get('/files/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const meta = files.find(f => f.id === id);
-
-  if (!meta) {
-    return res.status(404).json({ error: 'File not found' });
+  if (users.find(u => u.email === email)) {
+    return res.status(400).json({ error: 'Email already exists' });
   }
 
-  const filePath = join(uploadDir, meta.filename);
-  res.download(filePath, meta.originalName);
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = { id: nextId++, email, passwordHash };
+  users.push(user);
+
+  res.status(201).json({ id: user.id, email: user.email });
 });
 
-// DELETE /files/:id
-app.delete('/files/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const index = files.findIndex(f => f.id === id);
+// POST /auth/login
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
 
-  if (index === -1) {
-    return res.status(404).json({ error: 'File not found' });
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
   }
 
-  const meta = files[index];
+  const user = users.find(u => u.email === email);
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
 
-  // Delete physical file
-  import { unlinkSync } from 'fs';
-  import { join } from 'path';
-  const filePath = join(uploadDir, meta.filename);
+  const ok = await bcrypt.compare(password, user.passwordHash);
+  if (!ok) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  const accessToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: ACCESS_EXP });
+  const refreshToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: REFRESH_EXP });
+
+  user.refreshToken = refreshToken;
+
+  res.json({
+    accessToken,
+    refreshToken,
+    userId: user.id,
+    email: user.email
+  });
+});
+
+// POST /auth/refresh
+app.post('/auth/refresh', (req, res) => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    return res.status(400).json({ error: 'refreshToken is required' });
+  }
+
   try {
-    unlinkSync(filePath);
+    const payload = jwt.verify(refreshToken, JWT_SECRET);
+    const user = users.find(u => u.id === payload.userId && u.refreshToken === refreshToken);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    const newAccessToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: ACCESS_EXP });
+    const newRefreshToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: REFRESH_EXP });
+
+    user.refreshToken = newRefreshToken;
+
+    res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
   } catch {
-    // ignore if missing
+    return res.status(401).json({ error: 'Invalid refresh token' });
+  }
+});
+
+// GET /auth/me (requires access token)
+app.get('/auth/me', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid token' });
   }
 
-  files.splice(index, 1);
-  res.json(meta);
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const user = users.find(u => u.id === payload.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ id: user.id, email: user.email });
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+// POST /auth/logout
+app.post('/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid token' });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const user = users.find(u => u.id === payload.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.refreshToken = null;
+    res.json({ message: 'Logged out' });
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`File Upload API running at http://localhost:${PORT}`);
+  console.log(`Auth Service running at http://localhost:${PORT}`);
 });
