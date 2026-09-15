@@ -1,54 +1,46 @@
 const express = require('express');
-const Device = require('../models/Device');
-const Reading = require('../models/Reading');
+const { nanoid } = require('nanoid');
+const Url = require('../models/Url');
 const router = express.Router();
 
-router.post('/', async (req, res) => {
+router.post('/shorten', async (req, res) => {
   try {
-    const { deviceId, apiKey, temperature, humidity, batteryVoltage } = req.body;
-    if (!deviceId || !apiKey) {
-      return res.status(400).json({ error: 'deviceId and apiKey required' });
+    const { url, customAlias } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required' });
+
+    if (!/^https?:\/\/.+/i.test(url)) {
+      return res.status(400).json({ error: 'Invalid URL format' });
     }
 
-    const device = await Device.findOne({ deviceId, apiKey });
-    if (!device) return res.status(401).json({ error: 'Invalid device or API key' });
+    let shortCode = customAlias || nanoid(6);
+    let existing = await Url.findOne({ shortCode });
+    if (existing && !customAlias) {
+      shortCode = nanoid(6);
+    } else if (existing && customAlias) {
+      return res.status(409).json({ error: 'Alias already taken' });
+    }
 
-    const reading = new Reading({
-      device: device._id,
-      deviceId,
-      temperature,
-      humidity,
-      batteryVoltage
-    });
-    await reading.save();
+    const record = new Url({ originalUrl: url, shortCode });
+    await record.save();
 
-    res.status(201).json({ status: 'ok', readingId: reading._id });
+    const shortUrl = `${process.env.BASE_URL}/${shortCode}`;
+    res.status(201).json({ shortUrl, shortCode, originalUrl: url });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-router.get('/aggregate/:deviceId', async (req, res) => {
+router.get('/stats/:code', async (req, res) => {
   try {
-    const { deviceId } = req.params;
-    const stats = await Reading.aggregate([
-      { $match: { deviceId } },
-      {
-        $group: {
-          _id: {
-            date: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } }
-          },
-          avgTemp: { $avg: '$temperature' },
-          maxTemp: { $max: '$temperature' },
-          minTemp: { $min: '$temperature' },
-          avgHumidity: { $avg: '$humidity' },
-          avgBattery: { $avg: '$batteryVoltage' },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { '_id.date': -1 } }
-    ]);
-    res.json(stats);
+    const record = await Url.findOne({ shortCode: req.params.code });
+    if (!record) return res.status(404).json({ error: 'Not found' });
+    res.json({
+      shortCode: record.shortCode,
+      originalUrl: record.originalUrl,
+      clicks: record.clicks,
+      lastClickedAt: record.lastClickedAt,
+      createdAt: record.createdAt
+    });
   } catch {
     res.status(500).json({ error: 'Server error' });
   }
