@@ -1,49 +1,24 @@
 const express = require('express');
-const { nanoid } = require('nanoid');
-const Url = require('../models/Url');
-const router = express.Router();
+const mongoose = require('mongoose');
+const cors = require('cors');
+require('dotenv').config();
 
-router.post('/shorten', async (req, res) => {
-  try {
-    const { url, customAlias } = req.body;
-    if (!url) return res.status(400).json({ error: 'url is required' });
+const authRoutes = require('./routes/auth');
+const notesRoutes = require('./routes/notes');
 
-    if (!/^https?:\/\/.+/i.test(url)) {
-      return res.status(400).json({ error: 'Invalid URL format' });
-    }
+const app = express();
+const PORT = process.env.PORT || 3002;
 
-    let shortCode = customAlias || nanoid(6);
-    let existing = await Url.findOne({ shortCode });
-    if (existing && !customAlias) {
-      shortCode = nanoid(6);
-    } else if (existing && customAlias) {
-      return res.status(409).json({ error: 'Alias already taken' });
-    }
+app.use(cors());
+app.use(express.json());
 
-    const record = new Url({ originalUrl: url, shortCode });
-    await record.save();
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB error:', err));
 
-    const shortUrl = `${process.env.BASE_URL}/${shortCode}`;
-    res.status(201).json({ shortUrl, shortCode, originalUrl: url });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
+app.use('/api/auth', authRoutes);
+app.use('/api/notes', notesRoutes);
 
-router.get('/stats/:code', async (req, res) => {
-  try {
-    const record = await Url.findOne({ shortCode: req.params.code });
-    if (!record) return res.status(404).json({ error: 'Not found' });
-    res.json({
-      shortCode: record.shortCode,
-      originalUrl: record.originalUrl,
-      clicks: record.clicks,
-      lastClickedAt: record.lastClickedAt,
-      createdAt: record.createdAt
-    });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-module.exports = router;
+app.listen(PORT, () => console.log(`Notes/Blog API running on port ${PORT}`));
