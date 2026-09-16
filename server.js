@@ -1,24 +1,60 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-require('dotenv').config();
-
-const authRoutes = require('./routes/auth');
-const notesRoutes = require('./routes/notes');
-
 const app = express();
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3000;
 
-app.use(cors());
 app.use(express.json());
 
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB error:', err));
+// In-memory "database"
+let items = [
+  { id: 1, name: 'Item 1' },
+  { id: 2, name: 'Item 2' }
+];
 
-app.use('/api/auth', authRoutes);
-app.use('/api/notes', notesRoutes);
+// GET /api/items
+app.get('/api/items', (req, res) => {
+  res.json(items);
+});
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+// GET /api/items/:id
+app.get('/api/items/:id', (req, res) => {
+  const item = items.find(i => i.id === Number(req.params.id));
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  res.json(item);
+});
 
-app.listen(PORT, () => console.log(`Notes/Blog API running on port ${PORT}`));
+// POST /api/items
+app.post('/api/items', (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+
+  const newItem = {
+    id: items.length ? items[items.length - 1].id + 1 : 1,
+    name
+  };
+  items.push(newItem);
+  res.status(201).json(newItem);
+});
+
+// PUT /api/items/:id
+app.put('/api/items/:id', (req, res) => {
+  const item = items.find(i => i.id === Number(req.params.id));
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+
+  const { name } = req.body;
+  if (name) item.name = name;
+
+  res.json(item);
+});
+
+// DELETE /api/items/:id
+app.delete('/api/items/:id', (req, res) => {
+  const index = items.findIndex(i => i.id === Number(req.params.id));
+  if (index === -1) return res.status(404).json({ error: 'Item not found' });
+
+  const deleted = items.splice(index, 1)[0];
+  res.json(deleted);
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
