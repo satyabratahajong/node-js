@@ -1,71 +1,60 @@
 const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const Queue = require('bull');
 const { v4: uuidv4 } = require('uuid');
-const FileMeta = require('../models/FileMeta');
-const router = express.Router();
+require('dotenv').config();
 
-const uploadDir = process.env.UPLOAD_DIR || './uploads';
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const Job = require('./models/Job');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const name = uuidv4() + ext;
-    cb(null, name);
-  }
+const app = express();
+const PORT = process.env.PORT || 3012;
+
+app.use(cors());
+app.use(express.json());
+
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB error:', err));
+
+const jobQueue = new Queue('email-jobs', process.env.REDIS_URL || 'redis://localhost:6379');
+
+jobQueue.process(async (job) => {
+  // This is just a placeholder; real work happens in worker.js conceptually
+  // Here we just simulate delay and mark as done
+  await new Promise(r => setTimeout(r, 2000));
+  return { processed: true };
 });
 
-const upload = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
-});
-
-router.post('/files', upload.single('file'), async (req, res) => {
+app.post('/api/jobs', async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const { to, subject, body } = req.body;
+    if (!to || !subject) {
+      return res.status(400).json({ error: 'to and subject required' });
+    }
 
-    const baseUrl = process.env.BASE_URL || 'http://localhost:3011';
-    const url = `${baseUrl}/uploads/${req.file.filename}`;
+    const jobId = uuidv4();
+    const job = new Job({ jobId, to, subject, body, status: 'queued' });
+    await job.save();
 
-    const meta = new FileMeta({
-      originalName: req.file.originalname,
-      filename: req.file.filename,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      url
-    });
-    await meta.save();
+    await jobQueue.add({ jobId, to, subject, body }, { attempts: 3 });
 
-    res.status(201).json(meta);
+    res.status(201).json({ jobId, status: 'queued' });
   } catch {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-router.get('/files', async (req, res) => {
+app.get('/api/jobs/:jobId', async (req, res) => {
   try {
-    const files = await FileMeta.find().sort({ createdAt: -1 });
-    res.json(files);
+    const job = await Job.findOne({ jobId: req.params.jobId });
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(job);
   } catch {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-router.delete('/files/:id', async (req, res) => {
-  try {
-    const file = await FileMeta.findByIdAndDelete(req.params.id);
-    if (!file) return res.status(404).json({ error: 'File not found' });
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-    const filePath = path.join(uploadDir, file.filename);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-    res.json({ message: 'File deleted' });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-module.exports = router;
+app.listen(PORT, () => console.log(`Job Service running on port ${PORT}`));
