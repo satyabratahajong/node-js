@@ -1,95 +1,24 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
-const User = require('../models/User');
-const router = express.Router();
+const mongoose = require('mongoose');
+const cors = require('cors');
+const path = require('path');
+require('dotenv').config();
 
-router.post('/register', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
-    const existing = await User.findOne({ email });
-    if (existing) return res.status(409).json({ error: 'User already exists' });
+const uploadRoutes = require('./routes/uploads');
 
-    const user = new User({ email, password });
-    await user.save();
+const app = express();
+const PORT = process.env.PORT || 3011;
 
-    const accessToken = jwt.sign(
-      { userId: user._id },
-      process.env.JWT_ACCESS_SECRET,
-      { expiresIn: process.env.ACCESS_EXPIRES_IN || '15m' }
-    );
-    const refreshToken = crypto.randomBytes(20).toString('hex');
-    user.refreshToken = refreshToken;
-    await user.save();
+app.use(cors());
+app.use(express.json());
 
-    res.status(201).json({ accessToken, refreshToken, userId: user._id });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB error:', err));
 
-router.post('/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/api', uploadRoutes);
 
-    const accessToken = jwt.sign(
-      { userId: user._id },
-      process.env.JWT_ACCESS_SECRET,
-      { expiresIn: process.env.ACCESS_EXPIRES_IN || '15m' }
-    );
-    const refreshToken = crypto.randomBytes(20).toString('hex');
-    user.refreshToken = refreshToken;
-    await user.save();
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-    res.json({ accessToken, refreshToken, userId: user._id });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-router.post('/refresh', async (req, res) => {
-  try {
-    const { refreshToken } = req.body;
-    if (!refreshToken) {
-      return res.status(400).json({ error: 'Refresh token required' });
-    }
-
-    const user = await User.findOne({ refreshToken });
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid refresh token' });
-    }
-
-    const newAccessToken = jwt.sign(
-      { userId: user._id },
-      process.env.JWT_ACCESS_SECRET,
-      { expiresIn: process.env.ACCESS_EXPIRES_IN || '15m' }
-    );
-
-    res.json({ accessToken: newAccessToken });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-router.post('/logout', async (req, res) => {
-  try {
-    const { refreshToken } = req.body;
-    const user = await User.findOne({ refreshToken });
-    if (user) {
-      user.refreshToken = undefined;
-      await user.save();
-    }
-    res.json({ message: 'Logged out' });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-module.exports = router;
+app.listen(PORT, () => console.log(`File Upload Service running on port ${PORT}`));
