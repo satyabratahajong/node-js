@@ -1,24 +1,71 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
+const multer = require('multer');
 const path = require('path');
-require('dotenv').config();
+const fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
+const FileMeta = require('../models/FileMeta');
+const router = express.Router();
 
-const uploadRoutes = require('./routes/uploads');
+const uploadDir = process.env.UPLOAD_DIR || './uploads';
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-const app = express();
-const PORT = process.env.PORT || 3011;
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const name = uuidv4() + ext;
+    cb(null, name);
+  }
+});
 
-app.use(cors());
-app.use(express.json());
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+});
 
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB error:', err));
+router.post('/files', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/api', uploadRoutes);
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3011';
+    const url = `${baseUrl}/uploads/${req.file.filename}`;
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+    const meta = new FileMeta({
+      originalName: req.file.originalname,
+      filename: req.file.filename,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      url
+    });
+    await meta.save();
 
-app.listen(PORT, () => console.log(`File Upload Service running on port ${PORT}`));
+    res.status(201).json(meta);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.get('/files', async (req, res) => {
+  try {
+    const files = await FileMeta.find().sort({ createdAt: -1 });
+    res.json(files);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.delete('/files/:id', async (req, res) => {
+  try {
+    const file = await FileMeta.findByIdAndDelete(req.params.id);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+
+    const filePath = path.join(uploadDir, file.filename);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
+    res.json({ message: 'File deleted' });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+module.exports = router;
