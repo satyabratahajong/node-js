@@ -1,24 +1,20 @@
-const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors');
-require('dotenv').config();
+const bcrypt = require('bcryptjs');
 
-const authRoutes = require('./routes/auth');
-const notesRoutes = require('./routes/notes');
+const userSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
 
-const app = express();
-const PORT = process.env.PORT || 3020;
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 10);
+  next();
+});
 
-app.use(cors());
-app.use(express.json());
+userSchema.methods.comparePassword = async function(candidate) {
+  return await bcrypt.compare(candidate, this.password);
+};
 
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB error:', err));
-
-app.use('/api/auth', authRoutes);
-app.use('/api/notes', notesRoutes);
-
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
-app.listen(PORT, () => console.log(`Notes API running on port ${PORT}`));
+module.exports = mongoose.model('User', userSchema);
