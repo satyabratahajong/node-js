@@ -1,39 +1,57 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
-const router = express.Router();
+const http = require('http');
+const { Server } = require('socket.io');
+const mongoose = require('mongoose');
+const cors = require('cors');
+require('dotenv').config();
 
-router.post('/register', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
-    const existing = await User.findOne({ email });
-    if (existing) return res.status(409).json({ error: 'User already exists' });
+const roomRoutes = require('./routes/rooms');
+const messageRoutes = require('./routes/messages');
 
-    const user = new User({ email, password });
-    await user.save();
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({ token, userId: user._id });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
+const PORT = process.env.PORT || 3021;
+
+app.use(cors());
+app.use(express.json());
+
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB error:', err));
+
+app.use('/api/rooms', roomRoutes);
+app.use('/api/messages', messageRoutes);
+
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// Socket.IO logic
+io.on('connection', (socket) => {
+  console.log('Client connected:', socket.id);
+
+  socket.on('joinRoom', ({ roomId }) => {
+    socket.join(`room:${roomId}`);
+    socket.to(`room:${roomId}`).emit('userJoined', { roomId, userId: socket.id });
+  });
+
+  socket.on('sendMessage', async ({ roomId, sender, text }) => {
+    const Message = mongoose.model('Message');
+    const msg = new Message({ roomId, sender, text });
+    await msg.save();
+    io.to(`room:${roomId}`).emit('newMessage', {
+      roomId,
+      sender,
+      text,
+      timestamp: msg.createdAt
+    });
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+  });
 });
 
-router.post('/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, userId: user._id });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
+server.listen(PORT, () => {
+  console.log(`Chat server running on port ${PORT}`);
 });
-
-module.exports = router;
