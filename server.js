@@ -1,101 +1,137 @@
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const slugify = require('slugify');
-const cors = require('cors');
-require('dotenv').config();
+const express = require("express");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const crypto = require("node:crypto");
 
 const app = express();
-const PORT = process.env.PORT || 3031;
-const NOTES_DIR = process.env.NOTES_DIR || './notes';
+const PORT = 3000;
 
-if (!fs.existsSync(NOTES_DIR)) fs.mkdirSync(NOTES_DIR, { recursive: true });
+const dataDirectory = path.join(__dirname, "data");
+const dataFile = path.join(dataDirectory, "tasks.json");
 
-app.use(cors());
 app.use(express.json());
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+async function ensureDatabase() {
+  await fs.mkdir(dataDirectory, { recursive: true });
 
-// List all notes (filenames without .md)
-app.get('/notes', (req, res) => {
   try {
-    const files = fs.readdirSync(NOTES_DIR).filter(f => f.endsWith('.md'));
-    const notes = files.map(f => ({ slug: f.replace(/\.md$/, '') }));
-    res.json(notes);
+    await fs.access(dataFile);
   } catch {
-    res.status(500).json({ error: 'Server error' });
+    await fs.writeFile(dataFile, "[]");
+  }
+}
+
+async function readTasks() {
+  const data = await fs.readFile(dataFile, "utf-8");
+  return JSON.parse(data);
+}
+
+async function saveTasks(tasks) {
+  await fs.writeFile(dataFile, JSON.stringify(tasks, null, 2));
+}
+
+app.get("/", (req, res) => {
+  res.json({
+    message: "Task Manager API",
+    endpoints: [
+      "GET /tasks",
+      "POST /tasks",
+      "PUT /tasks/:id",
+      "DELETE /tasks/:id"
+    ]
+  });
+});
+
+app.get("/tasks", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    res.json(tasks);
+  } catch (error) {
+    res.status(500).json({ error: "Could not read tasks" });
   }
 });
 
-// Get a note by slug
-app.get('/notes/:slug', (req, res) => {
+app.post("/tasks", async (req, res) => {
   try {
-    const slug = slugify(req.params.slug, { lower: true, strict: true });
-    const filePath = path.join(NOTES_DIR, `${slug}.md`);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Note not found' });
+    const { title, description = "" } = req.body;
 
-    const content = fs.readFileSync(filePath, 'utf-8');
-    res.json({ slug, content });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Create a note
-app.post('/notes', (req, res) => {
-  try {
-    const { title, content } = req.body;
-    if (!title || !content) {
-      return res.status(400).json({ error: 'title and content required' });
+    if (!title || title.trim() === "") {
+      return res.status(400).json({
+        error: "Task title is required"
+      });
     }
 
-    const slug = slugify(title, { lower: true, strict: true });
-    const filePath = path.join(NOTES_DIR, `${slug}.md`);
+    const tasks = await readTasks();
 
-    if (fs.existsSync(filePath)) {
-      return res.status(409).json({ error: 'Note with this title already exists' });
+    const newTask = {
+      id: crypto.randomUUID(),
+      title: title.trim(),
+      description,
+      completed: false,
+      createdAt: new Date().toISOString()
+    };
+
+    tasks.push(newTask);
+    await saveTasks(tasks);
+
+    res.status(201).json(newTask);
+  } catch (error) {
+    res.status(500).json({ error: "Could not create task" });
+  }
+});
+
+app.put("/tasks/:id", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    const taskIndex = tasks.findIndex((task) => task.id === req.params.id);
+
+    if (taskIndex === -1) {
+      return res.status(404).json({
+        error: "Task not found"
+      });
     }
 
-    fs.writeFileSync(filePath, content, 'utf-8');
-    res.status(201).json({ slug, title, content });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
+    const currentTask = tasks[taskIndex];
+
+    tasks[taskIndex] = {
+      ...currentTask,
+      title: req.body.title ?? currentTask.title,
+      description: req.body.description ?? currentTask.description,
+      completed: req.body.completed ?? currentTask.completed,
+      updatedAt: new Date().toISOString()
+    };
+
+    await saveTasks(tasks);
+
+    res.json(tasks[taskIndex]);
+  } catch (error) {
+    res.status(500).json({ error: "Could not update task" });
   }
 });
 
-// Update a note
-app.put('/notes/:slug', (req, res) => {
+app.delete("/tasks/:id", async (req, res) => {
   try {
-    const slug = slugify(req.params.slug, { lower: true, strict: true });
-    const { content } = req.body;
-    if (content === undefined) {
-      return res.status(400).json({ error: 'content required' });
+    const tasks = await readTasks();
+    const filteredTasks = tasks.filter((task) => task.id !== req.params.id);
+
+    if (filteredTasks.length === tasks.length) {
+      return res.status(404).json({
+        error: "Task not found"
+      });
     }
 
-    const filePath = path.join(NOTES_DIR, `${slug}.md`);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Note not found' });
+    await saveTasks(filteredTasks);
 
-    fs.writeFileSync(filePath, content, 'utf-8');
-    res.json({ slug, content });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
+    res.json({
+      message: "Task deleted successfully"
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Could not delete task" });
   }
 });
 
-// Delete a note
-app.delete('/notes/:slug', (req, res) => {
-  try {
-    const slug = slugify(req.params.slug, { lower: true, strict: true });
-    const filePath = path.join(NOTES_DIR, `${slug}.md`);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Note not found' });
-
-    fs.unlinkSync(filePath);
-    res.json({ message: 'Note deleted' });
-  } catch {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Markdown Notes API running on port ${PORT}`);
+ensureDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Task API running at http://localhost:${PORT}`);
+  });
 });
