@@ -1,147 +1,137 @@
 const express = require("express");
-const Database = require("better-sqlite3");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const crypto = require("node:crypto");
 
 const app = express();
-const PORT = 3002;
+const PORT = 3000;
 
-const db = new Database("expenses.db");
+const dataDirectory = path.join(__dirname, "data");
+const dataFile = path.join(dataDirectory, "tasks.json");
 
 app.use(express.json());
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS expenses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    amount REAL NOT NULL,
-    category TEXT NOT NULL,
-    expense_date TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+async function ensureDatabase() {
+  await fs.mkdir(dataDirectory, { recursive: true });
+
+  try {
+    await fs.access(dataFile);
+  } catch {
+    await fs.writeFile(dataFile, "[]");
+  }
+}
+
+async function readTasks() {
+  const data = await fs.readFile(dataFile, "utf-8");
+  return JSON.parse(data);
+}
+
+async function saveTasks(tasks) {
+  await fs.writeFile(dataFile, JSON.stringify(tasks, null, 2));
+}
 
 app.get("/", (req, res) => {
   res.json({
-    message: "Expense Tracker API",
+    message: "Task Manager API",
     endpoints: [
-      "GET /expenses",
-      "POST /expenses",
-      "DELETE /expenses/:id",
-      "GET /expenses/summary"
+      "GET /tasks",
+      "POST /tasks",
+      "PUT /tasks/:id",
+      "DELETE /tasks/:id"
     ]
   });
 });
 
-app.get("/expenses", (req, res) => {
-  const { category } = req.query;
-
-  let expenses;
-
-  if (category) {
-    expenses = db
-      .prepare(
-        "SELECT * FROM expenses WHERE category = ? ORDER BY expense_date DESC"
-      )
-      .all(category);
-  } else {
-    expenses = db
-      .prepare("SELECT * FROM expenses ORDER BY expense_date DESC")
-      .all();
+app.get("/tasks", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    res.json(tasks);
+  } catch (error) {
+    res.status(500).json({ error: "Could not read tasks" });
   }
-
-  res.json(expenses);
 });
 
-app.post("/expenses", (req, res) => {
-  const {
-    title,
-    amount,
-    category,
-    expenseDate
-  } = req.body;
+app.post("/tasks", async (req, res) => {
+  try {
+    const { title, description = "" } = req.body;
 
-  if (!title || !category || !expenseDate) {
-    return res.status(400).json({
-      error: "title, category and expenseDate are required"
-    });
+    if (!title || title.trim() === "") {
+      return res.status(400).json({
+        error: "Task title is required"
+      });
+    }
+
+    const tasks = await readTasks();
+
+    const newTask = {
+      id: crypto.randomUUID(),
+      title: title.trim(),
+      description,
+      completed: false,
+      createdAt: new Date().toISOString()
+    };
+
+    tasks.push(newTask);
+    await saveTasks(tasks);
+
+    res.status(201).json(newTask);
+  } catch (error) {
+    res.status(500).json({ error: "Could not create task" });
   }
-
-  if (typeof amount !== "number" || amount <= 0) {
-    return res.status(400).json({
-      error: "amount must be a positive number"
-    });
-  }
-
-  const statement = db.prepare(`
-    INSERT INTO expenses
-    (title, amount, category, expense_date)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  const result = statement.run(
-    title,
-    amount,
-    category,
-    expenseDate
-  );
-
-  const expense = db
-    .prepare("SELECT * FROM expenses WHERE id = ?")
-    .get(result.lastInsertRowid);
-
-  res.status(201).json(expense);
 });
 
-app.delete("/expenses/:id", (req, res) => {
-  const result = db
-    .prepare("DELETE FROM expenses WHERE id = ?")
-    .run(req.params.id);
+app.put("/tasks/:id", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    const taskIndex = tasks.findIndex((task) => task.id === req.params.id);
 
-  if (result.changes === 0) {
-    return res.status(404).json({
-      error: "Expense not found"
-    });
+    if (taskIndex === -1) {
+      return res.status(404).json({
+        error: "Task not found"
+      });
+    }
+
+    const currentTask = tasks[taskIndex];
+
+    tasks[taskIndex] = {
+      ...currentTask,
+      title: req.body.title ?? currentTask.title,
+      description: req.body.description ?? currentTask.description,
+      completed: req.body.completed ?? currentTask.completed,
+      updatedAt: new Date().toISOString()
+    };
+
+    await saveTasks(tasks);
+
+    res.json(tasks[taskIndex]);
+  } catch (error) {
+    res.status(500).json({ error: "Could not update task" });
   }
+});
 
-  res.json({
-    message: "Expense deleted successfully"
+app.delete("/tasks/:id", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    const filteredTasks = tasks.filter((task) => task.id !== req.params.id);
+
+    if (filteredTasks.length === tasks.length) {
+      return res.status(404).json({
+        error: "Task not found"
+      });
+    }
+
+    await saveTasks(filteredTasks);
+
+    res.json({
+      message: "Task deleted successfully"
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Could not delete task" });
+  }
+});
+
+ensureDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Task API running at http://localhost:${PORT}`);
   });
-});
-
-app.get("/expenses/summary", (req, res) => {
-  const total = db
-    .prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM expenses")
-    .get();
-
-  const byCategory = db
-    .prepare(`
-      SELECT
-        category,
-        SUM(amount) AS total,
-        COUNT(*) AS count
-      FROM expenses
-      GROUP BY category
-      ORDER BY total DESC
-    `)
-    .all();
-
-  const monthly = db
-    .prepare(`
-      SELECT
-        substr(expense_date, 1, 7) AS month,
-        SUM(amount) AS total
-      FROM expenses
-      GROUP BY month
-      ORDER BY month DESC
-    `)
-    .all();
-
-  res.json({
-    total: Number(total.total.toFixed(2)),
-    byCategory,
-    monthly
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`Expense API running at http://localhost:${PORT}`);
 });
