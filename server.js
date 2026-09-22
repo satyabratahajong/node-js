@@ -1,137 +1,127 @@
-const express = require("express");
-const fs = require("node:fs/promises");
-const path = require("node:path");
-const crypto = require("node:crypto");
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3032;
+const DATA_FILE = process.env.DATA_FILE || './data/habits.json';
 
-const dataDirectory = path.join(__dirname, "data");
-const dataFile = path.join(dataDirectory, "tasks.json");
+// Ensure data directory
+const dataDir = path.dirname(DATA_FILE);
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
+// Load / initialize data
+let data = { habits: [], logs: [] };
+if (fs.existsSync(DATA_FILE)) {
+  try {
+    data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+  } catch {
+    // ignore corrupt file, start fresh
+  }
+}
+
+function saveData() {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+app.use(cors());
 app.use(express.json());
 
-async function ensureDatabase() {
-  await fs.mkdir(dataDirectory, { recursive: true });
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// Create habit
+app.post('/habits', (req, res) => {
   try {
-    await fs.access(dataFile);
-  } catch {
-    await fs.writeFile(dataFile, "[]");
-  }
-}
+    const { name, frequency } = req.body; // frequency: 'daily', 'weekly'
+    if (!name) return res.status(400).json({ error: 'name required' });
 
-async function readTasks() {
-  const data = await fs.readFile(dataFile, "utf-8");
-  return JSON.parse(data);
-}
-
-async function saveTasks(tasks) {
-  await fs.writeFile(dataFile, JSON.stringify(tasks, null, 2));
-}
-
-app.get("/", (req, res) => {
-  res.json({
-    message: "Task Manager API",
-    endpoints: [
-      "GET /tasks",
-      "POST /tasks",
-      "PUT /tasks/:id",
-      "DELETE /tasks/:id"
-    ]
-  });
-});
-
-app.get("/tasks", async (req, res) => {
-  try {
-    const tasks = await readTasks();
-    res.json(tasks);
-  } catch (error) {
-    res.status(500).json({ error: "Could not read tasks" });
-  }
-});
-
-app.post("/tasks", async (req, res) => {
-  try {
-    const { title, description = "" } = req.body;
-
-    if (!title || title.trim() === "") {
-      return res.status(400).json({
-        error: "Task title is required"
-      });
-    }
-
-    const tasks = await readTasks();
-
-    const newTask = {
-      id: crypto.randomUUID(),
-      title: title.trim(),
-      description,
-      completed: false,
+    const habit = {
+      id: uuidv4(),
+      name,
+      frequency: frequency || 'daily',
       createdAt: new Date().toISOString()
     };
-
-    tasks.push(newTask);
-    await saveTasks(tasks);
-
-    res.status(201).json(newTask);
-  } catch (error) {
-    res.status(500).json({ error: "Could not create task" });
+    data.habits.push(habit);
+    saveData();
+    res.status(201).json(habit);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-app.put("/tasks/:id", async (req, res) => {
-  try {
-    const tasks = await readTasks();
-    const taskIndex = tasks.findIndex((task) => task.id === req.params.id);
+// List habits
+app.get('/habits', (req, res) => {
+  res.json(data.habits);
+});
 
-    if (taskIndex === -1) {
-      return res.status(404).json({
-        error: "Task not found"
-      });
+// Log a habit completion
+app.post('/logs', (req, res) => {
+  try {
+    const { habitId, date } = req.body; // date: 'YYYY-MM-DD'
+    if (!habitId || !date) {
+      return res.status(400).json({ error: 'habitId and date required' });
     }
 
-    const currentTask = tasks[taskIndex];
+    const habit = data.habits.find(h => h.id === habitId);
+    if (!habit) return res.status(404).json({ error: 'Habit not found' });
 
-    tasks[taskIndex] = {
-      ...currentTask,
-      title: req.body.title ?? currentTask.title,
-      description: req.body.description ?? currentTask.description,
-      completed: req.body.completed ?? currentTask.completed,
-      updatedAt: new Date().toISOString()
-    };
+    const existing = data.logs.find(l => l.habitId === habitId && l.date === date);
+    if (existing) {
+      return res.status(409).json({ error: 'Log already exists for this date' });
+    }
 
-    await saveTasks(tasks);
-
-    res.json(tasks[taskIndex]);
-  } catch (error) {
-    res.status(500).json({ error: "Could not update task" });
+    const log = { id: uuidv4(), habitId, date, createdAt: new Date().toISOString() };
+    data.logs.push(log);
+    saveData();
+    res.status(201).json(log);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-app.delete("/tasks/:id", async (req, res) => {
+// Get logs for a habit
+app.get('/habits/:habitId/logs', (req, res) => {
+  const { habitId } = req.params;
+  const logs = data.logs.filter(l => l.habitId === habitId).sort((a, b) => a.date.localeCompare(b.date));
+  res.json(logs);
+});
+
+// Get simple stats for a habit (completion count & rate over last N days)
+app.get('/habits/:habitId/stats', (req, res) => {
   try {
-    const tasks = await readTasks();
-    const filteredTasks = tasks.filter((task) => task.id !== req.params.id);
+    const { habitId } = req.params;
+    const { lastDays = 30 } = req.query;
+    const habit = data.habits.find(h => h.id === habitId);
+    if (!habit) return res.status(404).json({ error: 'Habit not found' });
 
-    if (filteredTasks.length === tasks.length) {
-      return res.status(404).json({
-        error: "Task not found"
-      });
-    }
+    const today = new Date();
+    const start = new Date(today);
+    start.setDate(today.getDate() - parseInt(lastDays) + 1);
 
-    await saveTasks(filteredTasks);
+    const startStr = start.toISOString().slice(0, 10);
+    const endStr = today.toISOString().slice(0, 10);
+
+    const logs = data.logs.filter(
+      l => l.habitId === habitId && l.date >= startStr && l.date <= endStr
+    );
+
+    const completionCount = logs.length;
+    const rate = completionCount / parseInt(lastDays);
 
     res.json({
-      message: "Task deleted successfully"
+      habitId,
+      lastDays: parseInt(lastDays),
+      completionCount,
+      rate: Math.round(rate * 100) / 100
     });
-  } catch (error) {
-    res.status(500).json({ error: "Could not delete task" });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-ensureDatabase().then(() => {
-  app.listen(PORT, () => {
-    console.log(`Task API running at http://localhost:${PORT}`);
-  });
+app.listen(PORT, () => {
+  console.log(`Habit Tracker API running on port ${PORT}`);
 });
