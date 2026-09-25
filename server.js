@@ -1,73 +1,33 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const path = require('path');
+const mongoose = require('mongoose');
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
-
-app.use(cors());
-app.use(express.static('public')); // Serve static HTML client
-
-// In-memory document store (replace with DB/Redis for production)
-const documents = {};
-
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
-
-  // Join a document room
-  socket.on('joinDocument', ({ docId }) => {
-    socket.join(`doc:${docId}`);
-    
-    // Initialize doc if new
-    if (!documents[docId]) {
-      documents[docId] = { content: '', users: [] };
-    }
-    
-    documents[docId].users.push(socket.id);
-    
-    // Send current content to the new user
-    socket.emit('documentState', { content: documents[docId].content });
-    
-    // Notify others
-    socket.to(`doc:${docId}`).emit('userJoined', { userId: socket.id });
-  });
-
-  // Handle text changes
-  socket.on('textChange', ({ docId, content }) => {
-    if (!documents[docId]) return;
-    
-    documents[docId].content = content;
-    
-    // Broadcast to everyone else in the room
-    socket.to(`doc:${docId}`).emit('textUpdate', { 
-      content, 
-      userId: socket.id 
-    });
-  });
-
-  socket.on('disconnect', () => {
-    // Remove user from all docs
-    Object.keys(documents).forEach(docId => {
-      const doc = documents[docId];
-      const userIndex = doc.users.indexOf(socket.id);
-      if (userIndex > -1) {
-        doc.users.splice(userIndex, 1);
-        io.to(`doc:${docId}`).emit('userLeft', { userId: socket.id });
-        
-        // Cleanup empty docs
-        if (doc.users.length === 0) {
-          delete documents[docId];
-        }
-      }
-    });
-    console.log('User disconnected:', socket.id);
-  });
+const postSchema = new mongoose.Schema({
+  title: { type: String, required: true, trim: true },
+  slug: { type: String, required: true, unique: true },
+  content: { type: String, required: true },
+  excerpt: { type: String },
+  status: { 
+    type: String, 
+    enum: ['draft', 'published'], 
+    default: 'draft' 
+  },
+  author: { type: String, required: true },
+  tags: [{ type: String }],
+  category: { type: String },
+  publishedAt: { type: Date },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
 });
 
-const PORT = process.env.PORT || 3040;
-server.listen(PORT, () => {
-  console.log(`Collab Editor running on http://localhost:${PORT}`);
+// Auto-generate slug from title before saving
+postSchema.pre('save', function(next) {
+  if (this.isModified('title')) {
+    this.slug = this.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  }
+  this.updatedAt = new Date();
+  if (this.status === 'published' && !this.publishedAt) {
+    this.publishedAt = new Date();
+  }
+  next();
 });
+
+module.exports = mongoose.model('Post', postSchema);
