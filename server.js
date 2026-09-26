@@ -1,108 +1,144 @@
 const express = require('express');
 const cors = require('cors');
+const { v4: uuidv4 } = require('crypto').randomUUID;
 
 const app = express();
-const PORT = process.env.PORT || 3051;
+const PORT = process.env.PORT || 3052;
 
 app.use(cors());
 app.use(express.json());
 
-// Simulated API key database
-const API_KEYS = {
-  'key-free': { name: 'Free Tier', limit: 5, windowMs: 60000 },      // 5 req/min
-  'key-pro': { name: 'Pro Tier', limit: 50, windowMs: 60000 },       // 50 req/min
-  'key-unlimited': { name: 'Unlimited', limit: Infinity, windowMs: 60000 }
+// In-memory job store
+const jobs = new Map();
+
+// Simulate async job processing
+const processJob = async (jobId, type, payload) => {
+  const job = jobs.get(jobId);
+  
+  try {
+    job.status = 'processing';
+    job.startedAt = new Date().toISOString();
+
+    // Simulate work based on job type
+    const workTime = type === 'slow' ? 5000 : 2000;
+    await new Promise(resolve => setTimeout(resolve, workTime));
+
+    job.status = 'completed';
+    job.completedAt = new Date().toISOString();
+    job.result = {
+      message: `Job ${type} completed successfully`,
+      processedPayload: payload,
+      duration: workTime
+    };
+
+    // Send webhook if configured
+    if (job.webhookUrl) {
+      try {
+        await fetch(job.webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jobId,
+            status: 'completed',
+            result: job.result
+          })
+        });
+        job.webhookSent = true;
+      } catch (err) {
+        job.webhookError = err.message;
+      }
+    }
+  } catch (err) {
+    job.status = 'failed';
+    job.error = err.message;
+    job.failedAt = new Date().toISOString();
+  }
 };
 
-// In-memory rate limit store
-const rateLimitStore = {};
+// Create a new job
+app.post('/api/jobs', (req, res) => {
+  const { type = 'fast', payload, webhookUrl } = req.body;
 
-// Rate limiting middleware
-const rateLimiter = (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
-  
-  if (!apiKey || !API_KEYS[apiKey]) {
-    return res.status(401).json({ error: 'Invalid or missing API key' });
-  }
+  const jobId = uuidv4();
+  const job = {
+    id: jobId,
+    type,
+    payload,
+    webhookUrl,
+    status: 'queued',
+    createdAt: new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+    result: null,
+    error: null,
+    webhookSent: false,
+    webhookError: null
+  };
 
-  const keyConfig = API_KEYS[apiKey];
-  const now = Date.now();
-  const windowStart = now - keyConfig.windowMs;
+  jobs.set(jobId, job);
 
-  // Initialize or clean old entries
-  if (!rateLimitStore[apiKey]) {
-    rateLimitStore[apiKey] = [];
-  }
-  rateLimitStore[apiKey] = rateLimitStore[apiKey].filter(ts => ts > windowStart);
+  // Start processing asynchronously
+  processJob(jobId, type, payload);
 
-  // Check limit
-  if (rateLimitStore[apiKey].length >= keyConfig.limit) {
-    const retryAfter = Math.ceil((rateLimitStore[apiKey][0] + keyConfig.windowMs - now) / 1000);
-    res.setHeader('Retry-After', retryAfter);
-    return res.status(429).json({ 
-      error: 'Rate limit exceeded',
-      retryAfter,
-      tier: keyConfig.name
-    });
-  }
-
-  // Record this request
-  rateLimitStore[apiKey].push(now);
-  req.apiKey = apiKey;
-  req.tier = keyConfig.name;
-  
-  // Set headers for client
-  res.setHeader('X-RateLimit-Limit', keyConfig.limit);
-  res.setHeader('X-RateLimit-Remaining', keyConfig.limit - rateLimitStore[apiKey].length);
-  
-  next();
-};
-
-// Apply rate limiter to all /api routes
-app.use('/api', rateLimiter);
-
-// Mock backend endpoints
-app.get('/api/users', (req, res) => {
-  res.json({
-    data: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
-    tier: req.tier
+  res.status(201).json({
+    jobId,
+    status: 'queued',
+    message: 'Job created. Poll /api/jobs/:id for status.'
   });
 });
 
-app.get('/api/posts', (req, res) => {
-  res.json({
-    data: [{ id: 1, title: 'Hello World' }],
-    tier: req.tier
-  });
+// Get job status
+app.get('/api/jobs/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  res.json(job);
 });
 
-app.get('/api/stats', (req, res) => {
-  res.json({
-    message: 'Protected stats endpoint',
-    accessedBy: req.tier,
+// List all jobs
+app.get('/api/jobs', (req, res) => {
+  const allJobs = Array.from(jobs.values()).sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+  );
+  res.json(allJobs);
+});
+
+// Cancel a job (if still queued)
+app.delete('/api/jobs/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  if (job.status === 'processing' || job.status === 'completed') {
+    return res.status(400).json({ error: 'Cannot cancel job in current status' });
+  }
+
+  job.status = 'cancelled';
+  job.cancelledAt = new Date().toISOString();
+  
+  res.json({ message: 'Job cancelled', job });
+});
+
+// Webhook test endpoint (to receive callbacks)
+app.post('/webhook-test', (req, res) => {
+  console.log('📬 Webhook received:', req.body);
+  res.json({ received: true });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    activeJobs: jobs.size,
     timestamp: new Date().toISOString()
   });
 });
 
-// Public endpoint (no auth)
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Info endpoint to show available keys
-app.get('/docs', (req, res) => {
-  res.json({
-    message: 'API Gateway with Rate Limiting',
-    usage: 'Include header: X-API-Key: <key>',
-    keys: Object.entries(API_KEYS).map(([key, config]) => ({
-      key,
-      name: config.name,
-      limit: config.limit === Infinity ? 'Unlimited' : `${config.limit} req/${config.windowMs/1000}s`
-    }))
-  });
-});
-
 app.listen(PORT, () => {
-  console.log(`API Gateway running on http://localhost:${PORT}`);
-  console.log('Visit /docs to see available API keys');
+  console.log(`Job Queue running on http://localhost:${PORT}`);
+  console.log(`Webhook test endpoint: http://localhost:${PORT}/webhook-test`);
 });
