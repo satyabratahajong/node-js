@@ -1,124 +1,147 @@
 const express = require('express');
-const passport = require('passport');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const GitHubStrategy = require('passport-github2').Strategy;
-const session = require('express-session');
-require('dotenv').config();
+const multer = require('multer');
+const sharp = require('sharp');
+const path = require('path');
+const fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3060;
+const PORT = process.env.PORT || 3061;
 
-// In-memory user store (replace with DB)
-const users = new Map();
+app.use(cors());
+app.use('/uploads', express.static('uploads'));
+app.use('/processed', express.static('processed'));
 
-// Passport serialization
-passport.serializeUser((user, done) => done(null, user.id));
-passport.deserializeUser((id, done) => {
-  const user = users.get(id);
-  done(null, user || null);
+// Ensure directories exist
+['uploads', 'processed'].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// Google Strategy
-passport.use(new GoogleStrategy({
-  clientID: process.env.GOOGLE_CLIENT_ID,
-  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  callbackURL: `${process.env.BASE_URL}/auth/google/callback`
-}, async (accessToken, refreshToken, profile, done) => {
-  let user = users.get(profile.id);
-  if (!user) {
-    user = {
-      id: profile.id,
-      provider: 'google',
-      email: profile.emails?.[0]?.value,
-      name: profile.displayName,
-      avatar: profile.photos?.[0]?.value
-    };
-    users.set(profile.id, user);
+// Multer setup
+const storage = multer.diskStorage({
+  destination: 'uploads',
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `${uuidv4()}${ext}`);
   }
-  done(null, user);
-}));
+});
 
-// GitHub Strategy
-passport.use(new GitHubStrategy({
-  clientID: process.env.GITHUB_CLIENT_ID,
-  clientSecret: process.env.GITHUB_CLIENT_SECRET,
-  callbackURL: `${process.env.BASE_URL}/auth/github/callback`
-}, async (accessToken, refreshToken, profile, done) => {
-  let user = users.get(profile.id);
-  if (!user) {
-    user = {
-      id: profile.id,
-      provider: 'github',
-      email: profile.emails?.[0]?.value,
-      name: profile.displayName,
-      avatar: profile.photos?.[0]?.value
-    };
-    users.set(profile.id, user);
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const allowed = /jpeg|jpg|png|webp/;
+    const ext = allowed.test(path.extname(file.originalname).toLowerCase());
+    const mime = allowed.test(file.mimetype);
+    cb(null, ext && mime);
   }
-  done(null, user);
-}));
+});
 
-// Middleware
-app.use(session({
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: false } // Set true in production with HTTPS
-}));
-app.use(passport.initialize());
-app.use(passport.session());
-
-// Routes
-app.get('/', (req, res) => {
-  res.send(`
-    <h1>OAuth 2.0 Login Demo</h1>
-    ${req.user 
-      ? `<p>Logged in as: ${req.user.name}</p>
-         <p>Provider: ${req.user.provider}</p>
-         <a href="/logout">Logout</a>`
-      : `
-         <a href="/auth/google">Login with Google</a><br><br>
-         <a href="/auth/github">Login with GitHub</a>`
+// Upload and process endpoint
+app.post('/api/process', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image uploaded' });
     }
-  `);
+
+    const { width = 800, height, watermark, format = 'jpeg' } = req.body;
+    const inputPath = req.file.path;
+    const outputFilename = `${uuidv4()}.${format}`;
+    const outputPath = path.join('processed', outputFilename);
+
+    // Build sharp pipeline
+    let pipeline = sharp(inputPath);
+
+    // Resize if dimensions provided
+    if (width || height) {
+      pipeline = pipeline.resize(parseInt(width) || null, parseInt(height) || null, {
+        fit: 'inside',
+        withoutEnlargement: true
+      });
+    }
+
+    // Add watermark if provided
+    if (watermark) {
+      const watermarkBuffer = Buffer.from(
+        `<svg><text x="50%" y="50%" font-size="40" fill="white" text-anchor="middle" opacity="0.5">${watermark}</text></svg>`
+      );
+      pipeline = pipeline.composite([{
+        input: watermarkBuffer,
+        gravity: 'center'
+      }]);
+    }
+
+    // Convert format
+    if (format === 'jpeg') pipeline = pipeline.jpeg({ quality: 80 });
+    else if (format === 'png') pipeline = pipeline.png();
+    else if (format === 'webp') pipeline = pipeline.webp({ quality: 80 });
+
+    // Process and save
+    await pipeline.toFile(outputPath);
+
+    // Get metadata
+    const metadata = await sharp(outputPath).metadata();
+
+    res.json({
+      success: true,
+      original: {
+        filename: req.file.originalname,
+        size: req.file.size,
+        path: `/uploads/${req.file.filename}`
+      },
+      processed: {
+        filename: outputFilename,
+        path: `/processed/${outputFilename}`,
+        width: metadata.width,
+        height: metadata.height,
+        format: metadata.format,
+        size: fs.statSync(outputPath).size
+      }
+    });
+
+    // Optional: Delete original after processing
+    // fs.unlinkSync(inputPath);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Processing failed', message: err.message });
+  }
 });
 
-// Auth routes
-app.get('/auth/google', passport.authenticate('google', {
-  scope: ['profile', 'email']
-}));
+// Get image metadata
+app.get('/api/metadata/:filename', async (req, res) => {
+  try {
+    const filePath = path.join('processed', req.params.filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
 
-app.get('/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/' }),
-  (req, res) => res.redirect('/')
-);
-
-app.get('/auth/github', passport.authenticate('github', {
-  scope: ['user:email']
-}));
-
-app.get('/auth/github/callback',
-  passport.authenticate('github', { failureRedirect: '/' }),
-  (req, res) => res.redirect('/')
-);
-
-app.get('/logout', (req, res, next) => {
-  req.logout((err) => {
-    if (err) return next(err);
-    res.redirect('/');
-  });
+    const metadata = await sharp(filePath).metadata();
+    res.json({
+      filename: req.params.filename,
+      ...metadata
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/profile', (req, res) => {
-  if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
-  res.json(req.user);
+// List processed images
+app.get('/api/images', (req, res) => {
+  const files = fs.readdirSync('processed')
+    .filter(f => /\.(jpeg|jpg|png|webp)$/i.test(f))
+    .map(filename => ({
+      filename,
+      url: `/processed/${filename}`
+    }));
+  
+  res.json(files);
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', usersCount: users.size });
+  res.json({ status: 'ok' });
 });
 
 app.listen(PORT, () => {
-  console.log(`OAuth Login running on http://localhost:${PORT}`);
-  console.log('⚠️  Set up OAuth credentials in .env first!');
+  console.log(`Image Processor running on http://localhost:${PORT}`);
 });
