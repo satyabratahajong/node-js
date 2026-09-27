@@ -1,144 +1,124 @@
 const express = require('express');
-const cors = require('cors');
-const { v4: uuidv4 } = require('crypto').randomUUID;
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const GitHubStrategy = require('passport-github2').Strategy;
+const session = require('express-session');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3052;
+const PORT = process.env.PORT || 3060;
 
-app.use(cors());
-app.use(express.json());
+// In-memory user store (replace with DB)
+const users = new Map();
 
-// In-memory job store
-const jobs = new Map();
+// Passport serialization
+passport.serializeUser((user, done) => done(null, user.id));
+passport.deserializeUser((id, done) => {
+  const user = users.get(id);
+  done(null, user || null);
+});
 
-// Simulate async job processing
-const processJob = async (jobId, type, payload) => {
-  const job = jobs.get(jobId);
-  
-  try {
-    job.status = 'processing';
-    job.startedAt = new Date().toISOString();
-
-    // Simulate work based on job type
-    const workTime = type === 'slow' ? 5000 : 2000;
-    await new Promise(resolve => setTimeout(resolve, workTime));
-
-    job.status = 'completed';
-    job.completedAt = new Date().toISOString();
-    job.result = {
-      message: `Job ${type} completed successfully`,
-      processedPayload: payload,
-      duration: workTime
+// Google Strategy
+passport.use(new GoogleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL: `${process.env.BASE_URL}/auth/google/callback`
+}, async (accessToken, refreshToken, profile, done) => {
+  let user = users.get(profile.id);
+  if (!user) {
+    user = {
+      id: profile.id,
+      provider: 'google',
+      email: profile.emails?.[0]?.value,
+      name: profile.displayName,
+      avatar: profile.photos?.[0]?.value
     };
-
-    // Send webhook if configured
-    if (job.webhookUrl) {
-      try {
-        await fetch(job.webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jobId,
-            status: 'completed',
-            result: job.result
-          })
-        });
-        job.webhookSent = true;
-      } catch (err) {
-        job.webhookError = err.message;
-      }
-    }
-  } catch (err) {
-    job.status = 'failed';
-    job.error = err.message;
-    job.failedAt = new Date().toISOString();
+    users.set(profile.id, user);
   }
-};
+  done(null, user);
+}));
 
-// Create a new job
-app.post('/api/jobs', (req, res) => {
-  const { type = 'fast', payload, webhookUrl } = req.body;
+// GitHub Strategy
+passport.use(new GitHubStrategy({
+  clientID: process.env.GITHUB_CLIENT_ID,
+  clientSecret: process.env.GITHUB_CLIENT_SECRET,
+  callbackURL: `${process.env.BASE_URL}/auth/github/callback`
+}, async (accessToken, refreshToken, profile, done) => {
+  let user = users.get(profile.id);
+  if (!user) {
+    user = {
+      id: profile.id,
+      provider: 'github',
+      email: profile.emails?.[0]?.value,
+      name: profile.displayName,
+      avatar: profile.photos?.[0]?.value
+    };
+    users.set(profile.id, user);
+  }
+  done(null, user);
+}));
 
-  const jobId = uuidv4();
-  const job = {
-    id: jobId,
-    type,
-    payload,
-    webhookUrl,
-    status: 'queued',
-    createdAt: new Date().toISOString(),
-    startedAt: null,
-    completedAt: null,
-    result: null,
-    error: null,
-    webhookSent: false,
-    webhookError: null
-  };
+// Middleware
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: false } // Set true in production with HTTPS
+}));
+app.use(passport.initialize());
+app.use(passport.session());
 
-  jobs.set(jobId, job);
+// Routes
+app.get('/', (req, res) => {
+  res.send(`
+    <h1>OAuth 2.0 Login Demo</h1>
+    ${req.user 
+      ? `<p>Logged in as: ${req.user.name}</p>
+         <p>Provider: ${req.user.provider}</p>
+         <a href="/logout">Logout</a>`
+      : `
+         <a href="/auth/google">Login with Google</a><br><br>
+         <a href="/auth/github">Login with GitHub</a>`
+    }
+  `);
+});
 
-  // Start processing asynchronously
-  processJob(jobId, type, payload);
+// Auth routes
+app.get('/auth/google', passport.authenticate('google', {
+  scope: ['profile', 'email']
+}));
 
-  res.status(201).json({
-    jobId,
-    status: 'queued',
-    message: 'Job created. Poll /api/jobs/:id for status.'
+app.get('/auth/google/callback',
+  passport.authenticate('google', { failureRedirect: '/' }),
+  (req, res) => res.redirect('/')
+);
+
+app.get('/auth/github', passport.authenticate('github', {
+  scope: ['user:email']
+}));
+
+app.get('/auth/github/callback',
+  passport.authenticate('github', { failureRedirect: '/' }),
+  (req, res) => res.redirect('/')
+);
+
+app.get('/logout', (req, res, next) => {
+  req.logout((err) => {
+    if (err) return next(err);
+    res.redirect('/');
   });
 });
 
-// Get job status
-app.get('/api/jobs/:id', (req, res) => {
-  const job = jobs.get(req.params.id);
-  
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-
-  res.json(job);
-});
-
-// List all jobs
-app.get('/api/jobs', (req, res) => {
-  const allJobs = Array.from(jobs.values()).sort(
-    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-  );
-  res.json(allJobs);
-});
-
-// Cancel a job (if still queued)
-app.delete('/api/jobs/:id', (req, res) => {
-  const job = jobs.get(req.params.id);
-  
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-
-  if (job.status === 'processing' || job.status === 'completed') {
-    return res.status(400).json({ error: 'Cannot cancel job in current status' });
-  }
-
-  job.status = 'cancelled';
-  job.cancelledAt = new Date().toISOString();
-  
-  res.json({ message: 'Job cancelled', job });
-});
-
-// Webhook test endpoint (to receive callbacks)
-app.post('/webhook-test', (req, res) => {
-  console.log('📬 Webhook received:', req.body);
-  res.json({ received: true });
+app.get('/profile', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+  res.json(req.user);
 });
 
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    activeJobs: jobs.size,
-    timestamp: new Date().toISOString()
-  });
+  res.json({ status: 'ok', usersCount: users.size });
 });
 
 app.listen(PORT, () => {
-  console.log(`Job Queue running on http://localhost:${PORT}`);
-  console.log(`Webhook test endpoint: http://localhost:${PORT}/webhook-test`);
+  console.log(`OAuth Login running on http://localhost:${PORT}`);
+  console.log('⚠️  Set up OAuth credentials in .env first!');
 });
