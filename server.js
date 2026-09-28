@@ -1,140 +1,143 @@
+const { ApolloServer } = require('@apollo/server');
+const { expressMiddleware } = require('@apollo/server/express4');
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
 const cors = require('cors');
+const { json } = require('body-parser');
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+// In-memory data store
+let books = [
+  { id: '1', title: 'The Pragmatic Programmer', author: 'Hunt & Thomas', year: 1999, price: 49.99, category: 'Programming' },
+  { id: '2', title: 'Clean Code', author: 'Robert Martin', year: 2008, price: 39.99, category: 'Programming' },
+  { id: '3', title: 'Design Patterns', author: 'Gang of Four', year: 1994, price: 54.99, category: 'Programming' },
+  { id: '4', title: 'The Hobbit', author: 'J.R.R. Tolkien', year: 1937, price: 14.99, category: 'Fiction' },
+];
 
-const PORT = process.env.PORT || 3062;
+let authors = {};
+books.forEach(book => {
+  if (!authors[book.author]) {
+    authors[book.author] = { name: book.author, books: [] };
+  }
+  authors[book.author].books.push(book.id);
+});
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static('public'));
-
-// In-memory metrics store
-const metrics = {
-  pageViews: 0,
-  apiCalls: 0,
-  activeUsers: 0,
-  events: [],
-  topPages: {},
-  hourlyStats: {}
-};
-
-// Track metrics
-const trackEvent = (type, data) => {
-  const event = {
-    type,
-    data,
-    timestamp: new Date().toISOString()
-  };
-
-  metrics.events.push(event);
-  if (metrics.events.length > 1000) metrics.events.shift(); // Keep last 1000
-
-  // Update counters
-  if (type === 'pageview') {
-    metrics.pageViews++;
-    const page = data.path || '/';
-    metrics.topPages[page] = (metrics.topPages[page] || 0) + 1;
-  } else if (type === 'apiCall') {
-    metrics.apiCalls++;
+// GraphQL Schema
+const typeDefs = `#graphql
+  type Book {
+    id: ID!
+    title: String!
+    author: String!
+    year: Int
+    price: Float
+    category: String
   }
 
-  // Update hourly stats
-  const hour = new Date().getHours();
-  metrics.hourlyStats[hour] = (metrics.hourlyStats[hour] || 0) + 1;
+  type Author {
+    name: String!
+    books: [Book!]!
+  }
 
-  // Broadcast to all connected clients
-  io.emit('metricUpdate', {
-    type,
-    data: event,
-    summary: {
-      pageViews: metrics.pageViews,
-      apiCalls: metrics.apiCalls,
-      activeUsers: metrics.activeUsers
+  type Query {
+    books: [Book!]!
+    book(id: ID!): Book
+    booksByCategory(category: String!): [Book!]!
+    booksByAuthor(author: String!): [Book!]!
+    author(name: String!): Author
+    searchBooks(term: String!): [Book!]!
+  }
+
+  type Mutation {
+    addBook(title: String!, author: String!, year: Int, price: Float, category: String): Book!
+    updateBook(id: ID!, title: String, author: String, year: Int, price: Float, category: String): Book
+    deleteBook(id: ID!): Boolean
+  }
+`;
+
+// Resolvers
+const resolvers = {
+  Query: {
+    books: () => books,
+    book: (_, { id }) => books.find(b => b.id === id),
+    booksByCategory: (_, { category }) => books.filter(b => b.category === category),
+    booksByAuthor: (_, { author }) => books.filter(b => b.author === author),
+    author: (_, { name }) => {
+      const authorData = authors[name];
+      if (!authorData) return null;
+      return {
+        ...authorData,
+        books: authorData.books.map(id => books.find(b => b.id === id))
+      };
+    },
+    searchBooks: (_, { term }) => {
+      const lowerTerm = term.toLowerCase();
+      return books.filter(b => 
+        b.title.toLowerCase().includes(lowerTerm) || 
+        b.author.toLowerCase().includes(lowerTerm)
+      );
     }
-  });
+  },
+  Mutation: {
+    addBook: (_, { title, author, year, price, category }) => {
+      const id = String(books.length + 1);
+      const newBook = { id, title, author, year, price, category };
+      books.push(newBook);
+      
+      if (!authors[author]) {
+        authors[author] = { name: author, books: [] };
+      }
+      authors[author].books.push(id);
+      
+      return newBook;
+    },
+    updateBook: (_, { id, title, author, year, price, category }) => {
+      const index = books.findIndex(b => b.id === id);
+      if (index === -1) return null;
+      
+      const oldAuthor = books[index].author;
+      const book = { ...books[index], title, author, year, price, category };
+      books[index] = book;
+      
+      // Update author mapping if author changed
+      if (oldAuthor !== author) {
+        authors[oldAuthor].books = authors[oldAuthor].books.filter(bid => bid !== id);
+        if (!authors[author]) {
+          authors[author] = { name: author, books: [] };
+        }
+        authors[author].books.push(id);
+      }
+      
+      return book;
+    },
+    deleteBook: (_, { id }) => {
+      const index = books.findIndex(b => b.id === id);
+      if (index === -1) return false;
+      
+      const author = books[index].author;
+      books.splice(index, 1);
+      
+      authors[author].books = authors[author].books.filter(bid => bid !== id);
+      
+      return true;
+    }
+  }
 };
 
-// WebSocket connections
-io.on('connection', (socket) => {
-  metrics.activeUsers++;
-  io.emit('activeUsers', metrics.activeUsers);
-
-  console.log('Client connected:', socket.id);
-
-  // Send initial data
-  socket.emit('initialData', {
-    metrics,
-    activeUsers: metrics.activeUsers
+async function startServer() {
+  const server = new ApolloServer({
+    typeDefs,
+    resolvers
   });
 
-  socket.on('disconnect', () => {
-    metrics.activeUsers--;
-    io.emit('activeUsers', metrics.activeUsers);
-    console.log('Client disconnected:', socket.id);
+  await server.start();
+
+  const app = express();
+  app.use('/graphql', cors(), json(), expressMiddleware(server));
+
+  const PORT = process.env.PORT || 3070;
+  app.listen(PORT, () => {
+    console.log(`GraphQL Bookstore API running at http://localhost:${PORT}/graphql`);
+    console.log('Try this query:');
+    console.log(`{ books { id title author } }`);
   });
+}
 
-  // Receive custom events from clients
-  socket.on('trackEvent', (payload) => {
-    trackEvent(payload.type, payload.data);
-  });
-});
-
-// API endpoints to track events
-app.post('/api/track', (req, res) => {
-  const { type, data } = req.body;
-  if (!type) return res.status(400).json({ error: 'type required' });
-
-  trackEvent(type, data || {});
-  res.json({ success: true });
-});
-
-// Track page views via query param
-app.get('/api/track-pageview', (req, res) => {
-  trackEvent('pageview', {
-    path: req.query.path || '/',
-    referrer: req.query.referrer
-  });
-  res.json({ success: true });
-});
-
-// Get current metrics
-app.get('/api/metrics', (req, res) => {
-  res.json({
-    pageViews: metrics.pageViews,
-    apiCalls: metrics.apiCalls,
-    activeUsers: metrics.activeUsers,
-    topPages: Object.entries(metrics.topPages)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10),
-    hourlyStats: metrics.hourlyStats,
-    recentEvents: metrics.events.slice(-20)
-  });
-});
-
-// Reset metrics (admin)
-app.post('/api/reset', (req, res) => {
-  metrics.pageViews = 0;
-  metrics.apiCalls = 0;
-  metrics.events = [];
-  metrics.topPages = {};
-  metrics.hourlyStats = {};
-  io.emit('metricsReset');
-  res.json({ success: true });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    activeUsers: metrics.activeUsers,
-    totalPageViews: metrics.pageViews
-  });
-});
-
-server.listen(PORT, () => {
-  console.log(`Analytics Dashboard running on http://localhost:${PORT}`);
-});
+startServer().catch(err => console.error(err));
