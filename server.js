@@ -1,185 +1,221 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
-const path = require('path');
-const fs = require('fs');
+const cron = require('node-cron');
 const cors = require('cors');
-const handlebars = require('handlebars');
+const { v4: uuidv4 } = require('crypto').randomUUID;
 
 const app = express();
-const PORT = process.env.PORT || 3071;
+const PORT = process.env.PORT || 3072;
 
 app.use(cors());
 app.use(express.json());
-app.use('/pdfs', express.static('pdfs'));
 
-// Ensure output directory exists
-if (!fs.existsSync('pdfs')) {
-  fs.mkdirSync('pdfs', { recursive: true });
-}
+// In-memory job store
+const jobs = new Map();
 
-// HTML Template for invoice
-const invoiceTemplate = `
-<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 40px; }
-    .header { text-align: center; margin-bottom: 30px; }
-    .invoice-details { margin-bottom: 20px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
-    th { background: #f5f5f5; }
-    .total { text-align: right; margin-top: 20px; font-size: 18px; font-weight: bold; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>INVOICE</h1>
-    <p>Invoice #{{invoiceNumber}}</p>
-  </div>
-  
-  <div class="invoice-details">
-    <p><strong>From:</strong> {{companyName}}</p>
-    <p><strong>To:</strong> {{customerName}}</p>
-    <p><strong>Date:</strong> {{date}}</p>
-  </div>
-  
-  <table>
-    <thead>
-      <tr>
-        <th>Item</th>
-        <th>Quantity</th>
-        <th>Price</th>
-        <th>Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      {{#each items}}
-      <tr>
-        <td>{{this.name}}</td>
-        <td>{{this.quantity}}</td>
-        <td>${{this.price}}</td>
-        <td>${{this.total}}</td>
-      </tr>
-      {{/each}}
-    </tbody>
-  </table>
-  
-  <div class="total">
-    Grand Total: ${{grandTotal}}
-  </div>
-</body>
-</html>
-`;
+// Task types with handlers
+const taskHandlers = {
+  'log': (data) => {
+    console.log(`[LOG] ${new Date().toISOString()}: ${data.message}`);
+    return { logged: true };
+  },
+  'cleanup': (data) => {
+    console.log(`[CLEANUP] Running cleanup for ${data.target}`);
+    return { cleaned: data.target, timestamp: new Date().toISOString() };
+  },
+  'report': (data) => {
+    console.log(`[REPORT] Generating ${data.type} report`);
+    return { reportType: data.type, generated: true };
+  },
+  'backup': (data) => {
+    console.log(`[BACKUP] Backing up ${data.source} to ${data.destination}`);
+    return { backedUp: true, source: data.source };
+  }
+};
 
-// Generate PDF from HTML
-app.post('/api/generate-invoice', async (req, res) => {
+// Create a scheduled job
+app.post('/api/jobs', (req, res) => {
   try {
-    const { invoiceNumber, companyName, customerName, items } = req.body;
-    
-    if (!invoiceNumber || !customerName || !items) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    const { name, cronExpression, taskType, taskData, enabled = true } = req.body;
+
+    if (!name || !cronExpression || !taskType) {
+      return res.status(400).json({ error: 'name, cronExpression, and taskType required' });
     }
 
-    // Calculate totals
-    const itemsWithTotals = items.map(item => ({
-      ...item,
-      total: item.quantity * item.price
-    }));
-    
-    const grandTotal = itemsWithTotals.reduce((sum, item) => sum + item.total, 0);
+    if (!taskHandlers[taskType]) {
+      return res.status(400).json({ error: `Unknown task type: ${taskType}` });
+    }
 
-    // Compile template
-    const template = handlebars.compile(invoiceTemplate);
-    const html = template({
-      invoiceNumber,
-      companyName: companyName || 'Your Company',
-      customerName,
-      date: new Date().toLocaleDateString(),
-      items: itemsWithTotals,
-      grandTotal: grandTotal.toFixed(2)
+    // Validate cron expression
+    if (!cron.validate(cronExpression)) {
+      return res.status(400).json({ error: 'Invalid cron expression' });
+    }
+
+    const jobId = uuidv4();
+    const job = {
+      id: jobId,
+      name,
+      cronExpression,
+      taskType,
+      taskData: taskData || {},
+      enabled,
+      createdAt: new Date().toISOString(),
+      lastRun: null,
+      nextRun: null,
+      runCount: 0,
+      lastResult: null
+    };
+
+    // Schedule the job
+    const scheduledTask = cron.schedule(cronExpression, async () => {
+      if (!job.enabled) return;
+
+      console.log(`Running job: ${name} (${jobId})`);
+      
+      try {
+        const result = await taskHandlers[taskType](job.taskData);
+        job.lastRun = new Date().toISOString();
+        job.lastResult = { success: true, result, timestamp: job.lastRun };
+        job.runCount++;
+      } catch (err) {
+        job.lastResult = { success: false, error: err.message, timestamp: new Date().toISOString() };
+      }
+    }, {
+      scheduled: enabled
     });
 
-    // Launch browser and generate PDF
-    const browser = await puppeteer.launch();
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    
-    const filename = `invoice-${invoiceNumber}.pdf`;
-    const filepath = path.join('pdfs', filename);
-    
-    await page.pdf({
-      path: filepath,
-      format: 'A4',
-      printBackground: true
-    });
+    job.scheduledTask = scheduledTask;
+    jobs.set(jobId, job);
 
-    await browser.close();
-
-    res.json({
-      success: true,
-      filename,
-      url: `/pdfs/${filename}`,
-      grandTotal
+    res.status(201).json({
+      id: jobId,
+      name,
+      cronExpression,
+      nextRun: scheduledTask.getNextDates(1)[0]
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'PDF generation failed', message: err.message });
+    res.status(500).json({ error: 'Failed to create job', message: err.message });
   }
 });
 
-// Generate PDF from custom HTML
-app.post('/api/generate-custom', async (req, res) => {
-  try {
-    const { html, filename = 'custom.pdf' } = req.body;
-    
-    if (!html) {
-      return res.status(400).json({ error: 'HTML content required' });
-    }
-
-    const browser = await puppeteer.launch();
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    
-    const safeFilename = filename.replace(/[^a-z0-9.-]/gi, '_');
-    const filepath = path.join('pdfs', safeFilename);
-    
-    await page.pdf({
-      path: filepath,
-      format: 'A4',
-      printBackground: true
-    });
-
-    await browser.close();
-
-    res.json({
-      success: true,
-      filename: safeFilename,
-      url: `/pdfs/${safeFilename}`
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'PDF generation failed', message: err.message });
-  }
-});
-
-// List generated PDFs
-app.get('/api/pdfs', (req, res) => {
-  const files = fs.readdirSync('pdfs')
-    .filter(f => f.endsWith('.pdf'))
-    .map(filename => ({
-      filename,
-      url: `/pdfs/${filename}`,
-      size: fs.statSync(path.join('pdfs', filename)).size
-    }));
+// Get all jobs
+app.get('/api/jobs', (req, res) => {
+  const allJobs = Array.from(jobs.values()).map(job => ({
+    id: job.id,
+    name: job.name,
+    cronExpression: job.cronExpression,
+    taskType: job.taskType,
+    enabled: job.enabled,
+    lastRun: job.lastRun,
+    nextRun: job.scheduledTask.getNextDates(1)[0],
+    runCount: job.runCount,
+    lastResult: job.lastResult
+  }));
   
-  res.json(files);
+  res.json(allJobs);
+});
+
+// Get single job
+app.get('/api/jobs/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  
+  res.json({
+    id: job.id,
+    name: job.name,
+    cronExpression: job.cronExpression,
+    taskType: job.taskType,
+    taskData: job.taskData,
+    enabled: job.enabled,
+    lastRun: job.lastRun,
+    nextRun: job.scheduledTask.getNextDates(1)[0],
+    runCount: job.runCount,
+    lastResult: job.lastResult
+  });
+});
+
+// Enable/disable job
+app.patch('/api/jobs/:id/toggle', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const { enabled } = req.body;
+  job.enabled = enabled;
+  
+  if (enabled) {
+    job.scheduledTask.start();
+  } else {
+    job.scheduledTask.stop();
+  }
+
+  res.json({ id: job.id, enabled: job.enabled });
+});
+
+// Delete job
+app.delete('/api/jobs/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  job.scheduledTask.stop();
+  jobs.delete(req.params.id);
+  
+  res.json({ message: 'Job deleted' });
+});
+
+// Run job immediately
+app.post('/api/jobs/:id/run', async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  try {
+    const result = await taskHandlers[job.taskType](job.taskData);
+    job.lastRun = new Date().toISOString();
+    job.lastResult = { success: true, result, timestamp: job.lastRun };
+    job.runCount++;
+    
+    res.json({ success: true, result });
+  } catch (err) {
+    job.lastResult = { success: false, error: err.message, timestamp: new Date().toISOString() };
+    res.status(500).json({ error: 'Job execution failed', message: err.message });
+  }
+});
+
+// Available task types
+app.get('/api/task-types', (req, res) => {
+  res.json({
+    available: Object.keys(taskHandlers),
+    descriptions: {
+      log: 'Log a message to console',
+      cleanup: 'Simulate cleanup task',
+      report: 'Generate a report',
+      backup: 'Simulate backup operation'
+    }
+  });
+});
+
+// Common cron expressions reference
+app.get('/api/cron-reference', (req, res) => {
+  res.json({
+    examples: [
+      { expression: '* * * * *', description: 'Every minute' },
+      { expression: '0 * * * *', description: 'Every hour' },
+      { expression: '0 0 * * *', description: 'Every day at midnight' },
+      { expression: '0 0 * * 0', description: 'Every Sunday at midnight' },
+      { expression: '0 0 1 * *', description: 'First day of every month' },
+      { expression: '*/5 * * * *', description: 'Every 5 minutes' }
+    ]
+  });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ 
+    status: 'ok', 
+    activeJobs: Array.from(jobs.values()).filter(j => j.enabled).length,
+    totalJobs: jobs.size
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`PDF Generator running on http://localhost:${PORT}`);
+  console.log(`Cron Scheduler running on http://localhost:${PORT}`);
+  console.log('Check /api/cron-reference for cron expression examples');
 });
