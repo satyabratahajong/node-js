@@ -1,199 +1,201 @@
 const express = require('express');
-const { createClient } = require('redis');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3081;
+const PORT = process.env.PORT || 3082;
 
 app.use(cors());
+app.use('/uploads', express.static('uploads'));
 app.use(express.json());
 
-// Redis client
-const redisClient = createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379'
-});
-
-redisClient.on('error', (err) => console.error('Redis Error:', err));
-
-// In-memory data (simulate database)
-let products = [
-  { id: 1, name: 'Laptop', price: 999, category: 'Electronics', stock: 50 },
-  { id: 2, name: 'Mouse', price: 29, category: 'Electronics', stock: 200 },
-  { id: 3, name: 'Desk Chair', price: 199, category: 'Furniture', stock: 30 },
-  { id: 4, name: 'Notebook', price: 5, category: 'Stationery', stock: 500 },
-  { id: 5, name: 'Pen Set', price: 12, category: 'Stationery', stock: 150 },
-];
-
-// Cache helper functions
-const getCache = async (key) => {
-  const data = await redisClient.get(key);
-  return data ? JSON.parse(data) : null;
-};
-
-const setCache = async (key, data, ttl = 300) => {
-  await redisClient.setEx(key, ttl, JSON.stringify(data));
-};
-
-const invalidateCache = async (pattern) => {
-  const keys = await redisClient.keys(pattern);
-  if (keys.length > 0) {
-    await redisClient.del(keys);
-  }
-};
-
-// Initialize Redis connection
-async function init() {
-  await redisClient.connect();
-  console.log('Connected to Redis');
+// Ensure upload directory
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads', { recursive: true });
 }
 
-// GET all products (cached)
-app.get('/api/products', async (req, res) => {
-  try {
-    const { category, search } = req.query;
-    const cacheKey = `products:${category || 'all'}:${search || 'all'}`;
+// Allowed file types and max sizes
+const ALLOWED_TYPES = {
+  'image/jpeg': { ext: '.jpg', maxSize: 5 * 1024 * 1024 },
+  'image/png': { ext: '.png', maxSize: 5 * 1024 * 1024 },
+  'image/gif': { ext: '.gif', maxSize: 5 * 1024 * 1024 },
+  'application/pdf': { ext: '.pdf', maxSize: 10 * 1024 * 1024 },
+  'text/plain': { ext: '.txt', maxSize: 1 * 1024 * 1024 }
+};
 
-    // Try cache first
-    let cached = await getCache(cacheKey);
-    if (cached) {
-      res.setHeader('X-Cache', 'HIT');
-      return res.json(cached);
+// File filter
+const fileFilter = (req, file, cb) => {
+  if (!ALLOWED_TYPES[file.mimetype]) {
+    return cb(new Error('File type not allowed'), false);
+  }
+  cb(null, true);
+};
+
+// Multer setup
+const storage = multer.diskStorage({
+  destination: 'uploads',
+  filename: (req, file, cb) => {
+    const typeInfo = ALLOWED_TYPES[file.mimetype];
+    const ext = typeInfo ? typeInfo.ext : path.extname(file.originalname);
+    cb(null, `${uuidv4()}${ext}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB max
+  }
+});
+
+// Simulated virus scan
+const scanFile = async (filepath) => {
+  // In production, integrate with ClamAV or VirusTotal API
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      // Simulate 1% chance of "virus"
+      const isInfected = Math.random() < 0.01;
+      resolve({ clean: !isInfected, scanned: true });
+    }, 1000);
+  });
+};
+
+// Upload endpoint
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    // Filter products
-    let result = products;
-    if (category) result = result.filter(p => p.category === category);
-    if (search) {
-      const term = search.toLowerCase();
-      result = result.filter(p => p.name.toLowerCase().includes(term));
+    const filepath = req.file.path;
+    const stats = fs.statSync(filepath);
+
+    // Check file size
+    const typeInfo = ALLOWED_TYPES[req.file.mimetype];
+    if (typeInfo && stats.size > typeInfo.maxSize) {
+      fs.unlinkSync(filepath);
+      return res.status(400).json({ error: 'File too large' });
     }
 
-    // Cache for 5 minutes
-    await setCache(cacheKey, result, 300);
-
-    res.setHeader('X-Cache', 'MISS');
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// GET single product (cached)
-app.get('/api/products/:id', async (req, res) => {
-  try {
-    const cacheKey = `product:${req.params.id}`;
-
-    let cached = await getCache(cacheKey);
-    if (cached) {
-      res.setHeader('X-Cache', 'HIT');
-      return res.json(cached);
+    // Scan for viruses
+    const scanResult = await scanFile(filepath);
+    if (!scanResult.clean) {
+      fs.unlinkSync(filepath);
+      return res.status(400).json({ 
+        error: 'File failed security scan',
+        scanned: true
+      });
     }
 
-    const product = products.find(p => p.id === parseInt(req.params.id));
-    if (!product) return res.status(404).json({ error: 'Product not found' });
-
-    await setCache(cacheKey, product, 300);
-
-    res.setHeader('X-Cache', 'MISS');
-    res.json(product);
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// POST create product (invalidate cache)
-app.post('/api/products', async (req, res) => {
-  try {
-    const { name, price, category, stock } = req.body;
-    const id = products.length + 1;
-    const product = { id, name, price, category, stock };
-    products.push(product);
-
-    // Invalidate all product caches
-    await invalidateCache('product:*');
-    await invalidateCache('products:*');
-
-    res.status(201).json(product);
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// PUT update product (invalidate cache)
-app.put('/api/products/:id', async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const index = products.findIndex(p => p.id === id);
-    if (index === -1) return res.status(404).json({ error: 'Product not found' });
-
-    products[index] = { ...products[index], ...req.body };
-
-    // Invalidate specific product cache and list caches
-    await redisClient.del(`product:${id}`);
-    await invalidateCache('products:*');
-
-    res.json(products[index]);
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// DELETE product (invalidate cache)
-app.delete('/api/products/:id', async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const index = products.findIndex(p => p.id === id);
-    if (index === -1) return res.status(404).json({ error: 'Product not found' });
-
-    products.splice(index, 1);
-
-    await redisClient.del(`product:${id}`);
-    await invalidateCache('products:*');
-
-    res.json({ message: 'Product deleted' });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Cache stats
-app.get('/api/cache/stats', async (req, res) => {
-  try {
-    const keys = await redisClient.keys('product:*');
-    const productKeys = await redisClient.keys('products:*');
-    
     res.json({
-      cachedProducts: keys.length,
-      cachedLists: productKeys.length,
-      totalKeys: keys.length + productKeys.length
+      success: true,
+      file: {
+        id: uuidv4(),
+        originalName: req.file.originalname,
+        filename: req.file.filename,
+        mimetype: req.file.mimetype,
+        size: stats.size,
+        url: `/uploads/${req.file.filename}`,
+        uploadedAt: new Date().toISOString(),
+        scanned: scanResult.scanned
+      }
     });
   } catch (err) {
-    res.status(500).json({ error: 'Redis error' });
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File too large (max 10MB)' });
+      }
+      return res.status(400).json({ error: err.message });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Upload failed', message: err.message });
   }
 });
 
-// Clear all cache
-app.delete('/api/cache/clear', async (req, res) => {
+// Multiple file upload
+app.post('/api/upload-multiple', upload.array('files', 5), async (req, res) => {
   try {
-    await invalidateCache('product:*');
-    await invalidateCache('products:*');
-    res.json({ message: 'Cache cleared' });
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    const results = [];
+    for (const file of req.files) {
+      const filepath = file.path;
+      const stats = fs.statSync(filepath);
+      const scanResult = await scanFile(filepath);
+
+      if (!scanResult.clean) {
+        fs.unlinkSync(filepath);
+        results.push({
+          originalName: file.originalname,
+          error: 'Failed security scan'
+        });
+      } else {
+        results.push({
+          id: uuidv4(),
+          originalName: file.originalname,
+          filename: file.filename,
+          mimetype: file.mimetype,
+          size: stats.size,
+          url: `/uploads/${file.filename}`,
+          scanned: true
+        });
+      }
+    }
+
+    res.json({ success: true, files: results });
   } catch (err) {
-    res.status(500).json({ error: 'Redis error' });
+    res.status(500).json({ error: 'Upload failed', message: err.message });
   }
 });
 
-app.get('/health', async (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    redisConnected: redisClient.isOpen,
-    productsCount: products.length
+// List uploaded files
+app.get('/api/files', (req, res) => {
+  const files = fs.readdirSync('uploads')
+    .filter(f => !f.startsWith('.'))
+    .map(filename => {
+      const stats = fs.statSync(path.join('uploads', filename));
+      return {
+        filename,
+        url: `/uploads/${filename}`,
+        size: stats.size,
+        uploadedAt: stats.mtime
+      };
+    });
+  
+  res.json(files);
+});
+
+// Delete file
+app.delete('/api/files/:filename', (req, res) => {
+  const filepath = path.join('uploads', req.params.filename);
+  
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  fs.unlinkSync(filepath);
+  res.json({ message: 'File deleted' });
+});
+
+// Get upload rules
+app.get('/api/upload-rules', (req, res) => {
+  res.json({
+    allowedTypes: Object.keys(ALLOWED_TYPES),
+    maxSize: '10MB',
+    maxFiles: 5
   });
 });
 
-init().then(() => {
-  app.listen(PORT, () => {
-    console.log(`Cached API running on http://localhost:${PORT}`);
-  });
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.listen(PORT, () => {
+  console.log(`Secure Upload API running on http://localhost:${PORT}`);
 });
