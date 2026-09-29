@@ -1,221 +1,202 @@
 const express = require('express');
-const cron = require('node-cron');
+const http = require('http');
+const { Server } = require('socket.io');
 const cors = require('cors');
-const { v4: uuidv4 } = require('crypto').randomUUID;
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = process.env.PORT || 3072;
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+const PORT = process.env.PORT || 3080;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.static('public'));
 
-// In-memory job store
-const jobs = new Map();
+// In-memory store
+const rooms = new Map();
+const users = new Map();
 
-// Task types with handlers
-const taskHandlers = {
-  'log': (data) => {
-    console.log(`[LOG] ${new Date().toISOString()}: ${data.message}`);
-    return { logged: true };
-  },
-  'cleanup': (data) => {
-    console.log(`[CLEANUP] Running cleanup for ${data.target}`);
-    return { cleaned: data.target, timestamp: new Date().toISOString() };
-  },
-  'report': (data) => {
-    console.log(`[REPORT] Generating ${data.type} report`);
-    return { reportType: data.type, generated: true };
-  },
-  'backup': (data) => {
-    console.log(`[BACKUP] Backing up ${data.source} to ${data.destination}`);
-    return { backedUp: true, source: data.source };
-  }
-};
+// Initialize default room
+rooms.set('general', { id: 'general', name: 'General', messages: [], users: new Set() });
 
-// Create a scheduled job
-app.post('/api/jobs', (req, res) => {
-  try {
-    const { name, cronExpression, taskType, taskData, enabled = true } = req.body;
+io.on('connection', (socket) => {
+  console.log('User connected:', socket.id);
 
-    if (!name || !cronExpression || !taskType) {
-      return res.status(400).json({ error: 'name, cronExpression, and taskType required' });
-    }
-
-    if (!taskHandlers[taskType]) {
-      return res.status(400).json({ error: `Unknown task type: ${taskType}` });
-    }
-
-    // Validate cron expression
-    if (!cron.validate(cronExpression)) {
-      return res.status(400).json({ error: 'Invalid cron expression' });
-    }
-
-    const jobId = uuidv4();
-    const job = {
-      id: jobId,
-      name,
-      cronExpression,
-      taskType,
-      taskData: taskData || {},
-      enabled,
-      createdAt: new Date().toISOString(),
-      lastRun: null,
-      nextRun: null,
-      runCount: 0,
-      lastResult: null
+  // User joins with username
+  socket.on('join', ({ username, roomId = 'general' }) => {
+    const user = {
+      id: socket.id,
+      username,
+      roomId,
+      joinedAt: new Date().toISOString()
     };
 
-    // Schedule the job
-    const scheduledTask = cron.schedule(cronExpression, async () => {
-      if (!job.enabled) return;
+    users.set(socket.id, user);
 
-      console.log(`Running job: ${name} (${jobId})`);
-      
-      try {
-        const result = await taskHandlers[taskType](job.taskData);
-        job.lastRun = new Date().toISOString();
-        job.lastResult = { success: true, result, timestamp: job.lastRun };
-        job.runCount++;
-      } catch (err) {
-        job.lastResult = { success: false, error: err.message, timestamp: new Date().toISOString() };
-      }
-    }, {
-      scheduled: enabled
-    });
-
-    job.scheduledTask = scheduledTask;
-    jobs.set(jobId, job);
-
-    res.status(201).json({
-      id: jobId,
-      name,
-      cronExpression,
-      nextRun: scheduledTask.getNextDates(1)[0]
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to create job', message: err.message });
-  }
-});
-
-// Get all jobs
-app.get('/api/jobs', (req, res) => {
-  const allJobs = Array.from(jobs.values()).map(job => ({
-    id: job.id,
-    name: job.name,
-    cronExpression: job.cronExpression,
-    taskType: job.taskType,
-    enabled: job.enabled,
-    lastRun: job.lastRun,
-    nextRun: job.scheduledTask.getNextDates(1)[0],
-    runCount: job.runCount,
-    lastResult: job.lastResult
-  }));
-  
-  res.json(allJobs);
-});
-
-// Get single job
-app.get('/api/jobs/:id', (req, res) => {
-  const job = jobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  
-  res.json({
-    id: job.id,
-    name: job.name,
-    cronExpression: job.cronExpression,
-    taskType: job.taskType,
-    taskData: job.taskData,
-    enabled: job.enabled,
-    lastRun: job.lastRun,
-    nextRun: job.scheduledTask.getNextDates(1)[0],
-    runCount: job.runCount,
-    lastResult: job.lastResult
-  });
-});
-
-// Enable/disable job
-app.patch('/api/jobs/:id/toggle', (req, res) => {
-  const job = jobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-
-  const { enabled } = req.body;
-  job.enabled = enabled;
-  
-  if (enabled) {
-    job.scheduledTask.start();
-  } else {
-    job.scheduledTask.stop();
-  }
-
-  res.json({ id: job.id, enabled: job.enabled });
-});
-
-// Delete job
-app.delete('/api/jobs/:id', (req, res) => {
-  const job = jobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-
-  job.scheduledTask.stop();
-  jobs.delete(req.params.id);
-  
-  res.json({ message: 'Job deleted' });
-});
-
-// Run job immediately
-app.post('/api/jobs/:id/run', async (req, res) => {
-  const job = jobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-
-  try {
-    const result = await taskHandlers[job.taskType](job.taskData);
-    job.lastRun = new Date().toISOString();
-    job.lastResult = { success: true, result, timestamp: job.lastRun };
-    job.runCount++;
-    
-    res.json({ success: true, result });
-  } catch (err) {
-    job.lastResult = { success: false, error: err.message, timestamp: new Date().toISOString() };
-    res.status(500).json({ error: 'Job execution failed', message: err.message });
-  }
-});
-
-// Available task types
-app.get('/api/task-types', (req, res) => {
-  res.json({
-    available: Object.keys(taskHandlers),
-    descriptions: {
-      log: 'Log a message to console',
-      cleanup: 'Simulate cleanup task',
-      report: 'Generate a report',
-      backup: 'Simulate backup operation'
+    // Create room if doesn't exist
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, { id: roomId, name: roomId, messages: [], users: new Set() });
     }
+
+    const room = rooms.get(roomId);
+    room.users.add(socket.id);
+    socket.join(roomId);
+
+    // Send room history to user
+    socket.emit('roomHistory', { messages: room.messages.slice(-50) });
+
+    // Notify room members
+    socket.to(roomId).emit('userJoined', {
+      roomId,
+      user: { id: socket.id, username }
+    });
+
+    // Send updated user list to room
+    io.to(roomId).emit('roomUsers', {
+      roomId,
+      users: Array.from(room.users).map(uid => users.get(uid)).filter(Boolean)
+    });
+
+    socket.emit('joined', { roomId, user });
+  });
+
+  // Handle chat messages
+  socket.on('message', ({ roomId, content }) => {
+    const user = users.get(socket.id);
+    if (!user || user.roomId !== roomId) return;
+
+    const message = {
+      id: uuidv4(),
+      roomId,
+      userId: socket.id,
+      username: user.username,
+      content,
+      timestamp: new Date().toISOString()
+    };
+
+    const room = rooms.get(roomId);
+    if (room) {
+      room.messages.push(message);
+      // Keep last 100 messages
+      if (room.messages.length > 100) room.messages.shift();
+    }
+
+    io.to(roomId).emit('message', message);
+  });
+
+  // Typing indicator
+  socket.on('typing', ({ roomId, isTyping }) => {
+    const user = users.get(socket.id);
+    if (!user || user.roomId !== roomId) return;
+
+    socket.to(roomId).emit('userTyping', {
+      roomId,
+      userId: socket.id,
+      username: user.username,
+      isTyping
+    });
+  });
+
+  // Switch room
+  socket.on('switchRoom', ({ roomId }) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+
+    const oldRoomId = user.roomId;
+    const oldRoom = rooms.get(oldRoomId);
+    
+    if (oldRoom) {
+      oldRoom.users.delete(socket.id);
+      socket.leave(oldRoomId);
+      
+      io.to(oldRoomId).emit('userLeft', {
+        roomId: oldRoomId,
+        user: { id: socket.id, username: user.username }
+      });
+
+      io.to(oldRoomId).emit('roomUsers', {
+        roomId: oldRoomId,
+        users: Array.from(oldRoom.users).map(uid => users.get(uid)).filter(Boolean)
+      });
+    }
+
+    // Join new room
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, { id: roomId, name: roomId, messages: [], users: new Set() });
+    }
+
+    const newRoom = rooms.get(roomId);
+    newRoom.users.add(socket.id);
+    user.roomId = roomId;
+    socket.join(roomId);
+
+    socket.emit('roomHistory', { messages: newRoom.messages.slice(-50) });
+    
+    io.to(roomId).emit('userJoined', {
+      roomId,
+      user: { id: socket.id, username: user.username }
+    });
+
+    io.to(roomId).emit('roomUsers', {
+      roomId,
+      users: Array.from(newRoom.users).map(uid => users.get(uid)).filter(Boolean)
+    });
+
+    socket.emit('switchedRoom', { roomId });
+  });
+
+  // Disconnect
+  socket.on('disconnect', () => {
+    const user = users.get(socket.id);
+    if (user) {
+      const room = rooms.get(user.roomId);
+      if (room) {
+        room.users.delete(socket.id);
+        
+        io.to(user.roomId).emit('userLeft', {
+          roomId: user.roomId,
+          user: { id: socket.id, username: user.username }
+        });
+
+        io.to(user.roomId).emit('roomUsers', {
+          roomId: user.roomId,
+          users: Array.from(room.users).map(uid => users.get(uid)).filter(Boolean)
+        });
+      }
+      
+      users.delete(socket.id);
+    }
+    console.log('User disconnected:', socket.id);
   });
 });
 
-// Common cron expressions reference
-app.get('/api/cron-reference', (req, res) => {
-  res.json({
-    examples: [
-      { expression: '* * * * *', description: 'Every minute' },
-      { expression: '0 * * * *', description: 'Every hour' },
-      { expression: '0 0 * * *', description: 'Every day at midnight' },
-      { expression: '0 0 * * 0', description: 'Every Sunday at midnight' },
-      { expression: '0 0 1 * *', description: 'First day of every month' },
-      { expression: '*/5 * * * *', description: 'Every 5 minutes' }
-    ]
-  });
+// API: Get all rooms
+app.get('/api/rooms', (req, res) => {
+  const roomList = Array.from(rooms.values()).map(room => ({
+    id: room.id,
+    name: room.name,
+    userCount: room.users.size,
+    messageCount: room.messages.length
+  }));
+  res.json(roomList);
+});
+
+// API: Get room messages
+app.get('/api/rooms/:roomId/messages', (req, res) => {
+  const room = rooms.get(req.params.roomId);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  res.json(room.messages.slice(-100));
 });
 
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    activeJobs: Array.from(jobs.values()).filter(j => j.enabled).length,
-    totalJobs: jobs.size
+    activeUsers: users.size,
+    totalRooms: rooms.size
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Cron Scheduler running on http://localhost:${PORT}`);
-  console.log('Check /api/cron-reference for cron expression examples');
+server.listen(PORT, () => {
+  console.log(`Chat server running on http://localhost:${PORT}`);
 });
