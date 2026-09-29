@@ -1,202 +1,199 @@
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+const { createClient } = require('redis');
 const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
-
-const PORT = process.env.PORT || 3080;
+const PORT = process.env.PORT || 3081;
 
 app.use(cors());
-app.use(express.static('public'));
+app.use(express.json());
 
-// In-memory store
-const rooms = new Map();
-const users = new Map();
+// Redis client
+const redisClient = createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
 
-// Initialize default room
-rooms.set('general', { id: 'general', name: 'General', messages: [], users: new Set() });
+redisClient.on('error', (err) => console.error('Redis Error:', err));
 
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+// In-memory data (simulate database)
+let products = [
+  { id: 1, name: 'Laptop', price: 999, category: 'Electronics', stock: 50 },
+  { id: 2, name: 'Mouse', price: 29, category: 'Electronics', stock: 200 },
+  { id: 3, name: 'Desk Chair', price: 199, category: 'Furniture', stock: 30 },
+  { id: 4, name: 'Notebook', price: 5, category: 'Stationery', stock: 500 },
+  { id: 5, name: 'Pen Set', price: 12, category: 'Stationery', stock: 150 },
+];
 
-  // User joins with username
-  socket.on('join', ({ username, roomId = 'general' }) => {
-    const user = {
-      id: socket.id,
-      username,
-      roomId,
-      joinedAt: new Date().toISOString()
-    };
+// Cache helper functions
+const getCache = async (key) => {
+  const data = await redisClient.get(key);
+  return data ? JSON.parse(data) : null;
+};
 
-    users.set(socket.id, user);
+const setCache = async (key, data, ttl = 300) => {
+  await redisClient.setEx(key, ttl, JSON.stringify(data));
+};
 
-    // Create room if doesn't exist
-    if (!rooms.has(roomId)) {
-      rooms.set(roomId, { id: roomId, name: roomId, messages: [], users: new Set() });
+const invalidateCache = async (pattern) => {
+  const keys = await redisClient.keys(pattern);
+  if (keys.length > 0) {
+    await redisClient.del(keys);
+  }
+};
+
+// Initialize Redis connection
+async function init() {
+  await redisClient.connect();
+  console.log('Connected to Redis');
+}
+
+// GET all products (cached)
+app.get('/api/products', async (req, res) => {
+  try {
+    const { category, search } = req.query;
+    const cacheKey = `products:${category || 'all'}:${search || 'all'}`;
+
+    // Try cache first
+    let cached = await getCache(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', 'HIT');
+      return res.json(cached);
     }
 
-    const room = rooms.get(roomId);
-    room.users.add(socket.id);
-    socket.join(roomId);
-
-    // Send room history to user
-    socket.emit('roomHistory', { messages: room.messages.slice(-50) });
-
-    // Notify room members
-    socket.to(roomId).emit('userJoined', {
-      roomId,
-      user: { id: socket.id, username }
-    });
-
-    // Send updated user list to room
-    io.to(roomId).emit('roomUsers', {
-      roomId,
-      users: Array.from(room.users).map(uid => users.get(uid)).filter(Boolean)
-    });
-
-    socket.emit('joined', { roomId, user });
-  });
-
-  // Handle chat messages
-  socket.on('message', ({ roomId, content }) => {
-    const user = users.get(socket.id);
-    if (!user || user.roomId !== roomId) return;
-
-    const message = {
-      id: uuidv4(),
-      roomId,
-      userId: socket.id,
-      username: user.username,
-      content,
-      timestamp: new Date().toISOString()
-    };
-
-    const room = rooms.get(roomId);
-    if (room) {
-      room.messages.push(message);
-      // Keep last 100 messages
-      if (room.messages.length > 100) room.messages.shift();
+    // Filter products
+    let result = products;
+    if (category) result = result.filter(p => p.category === category);
+    if (search) {
+      const term = search.toLowerCase();
+      result = result.filter(p => p.name.toLowerCase().includes(term));
     }
 
-    io.to(roomId).emit('message', message);
-  });
+    // Cache for 5 minutes
+    await setCache(cacheKey, result, 300);
 
-  // Typing indicator
-  socket.on('typing', ({ roomId, isTyping }) => {
-    const user = users.get(socket.id);
-    if (!user || user.roomId !== roomId) return;
+    res.setHeader('X-Cache', 'MISS');
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
-    socket.to(roomId).emit('userTyping', {
-      roomId,
-      userId: socket.id,
-      username: user.username,
-      isTyping
-    });
-  });
+// GET single product (cached)
+app.get('/api/products/:id', async (req, res) => {
+  try {
+    const cacheKey = `product:${req.params.id}`;
 
-  // Switch room
-  socket.on('switchRoom', ({ roomId }) => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    let cached = await getCache(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', 'HIT');
+      return res.json(cached);
+    }
 
-    const oldRoomId = user.roomId;
-    const oldRoom = rooms.get(oldRoomId);
+    const product = products.find(p => p.id === parseInt(req.params.id));
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    await setCache(cacheKey, product, 300);
+
+    res.setHeader('X-Cache', 'MISS');
+    res.json(product);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST create product (invalidate cache)
+app.post('/api/products', async (req, res) => {
+  try {
+    const { name, price, category, stock } = req.body;
+    const id = products.length + 1;
+    const product = { id, name, price, category, stock };
+    products.push(product);
+
+    // Invalidate all product caches
+    await invalidateCache('product:*');
+    await invalidateCache('products:*');
+
+    res.status(201).json(product);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT update product (invalidate cache)
+app.put('/api/products/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const index = products.findIndex(p => p.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Product not found' });
+
+    products[index] = { ...products[index], ...req.body };
+
+    // Invalidate specific product cache and list caches
+    await redisClient.del(`product:${id}`);
+    await invalidateCache('products:*');
+
+    res.json(products[index]);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE product (invalidate cache)
+app.delete('/api/products/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const index = products.findIndex(p => p.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Product not found' });
+
+    products.splice(index, 1);
+
+    await redisClient.del(`product:${id}`);
+    await invalidateCache('products:*');
+
+    res.json({ message: 'Product deleted' });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Cache stats
+app.get('/api/cache/stats', async (req, res) => {
+  try {
+    const keys = await redisClient.keys('product:*');
+    const productKeys = await redisClient.keys('products:*');
     
-    if (oldRoom) {
-      oldRoom.users.delete(socket.id);
-      socket.leave(oldRoomId);
-      
-      io.to(oldRoomId).emit('userLeft', {
-        roomId: oldRoomId,
-        user: { id: socket.id, username: user.username }
-      });
-
-      io.to(oldRoomId).emit('roomUsers', {
-        roomId: oldRoomId,
-        users: Array.from(oldRoom.users).map(uid => users.get(uid)).filter(Boolean)
-      });
-    }
-
-    // Join new room
-    if (!rooms.has(roomId)) {
-      rooms.set(roomId, { id: roomId, name: roomId, messages: [], users: new Set() });
-    }
-
-    const newRoom = rooms.get(roomId);
-    newRoom.users.add(socket.id);
-    user.roomId = roomId;
-    socket.join(roomId);
-
-    socket.emit('roomHistory', { messages: newRoom.messages.slice(-50) });
-    
-    io.to(roomId).emit('userJoined', {
-      roomId,
-      user: { id: socket.id, username: user.username }
+    res.json({
+      cachedProducts: keys.length,
+      cachedLists: productKeys.length,
+      totalKeys: keys.length + productKeys.length
     });
-
-    io.to(roomId).emit('roomUsers', {
-      roomId,
-      users: Array.from(newRoom.users).map(uid => users.get(uid)).filter(Boolean)
-    });
-
-    socket.emit('switchedRoom', { roomId });
-  });
-
-  // Disconnect
-  socket.on('disconnect', () => {
-    const user = users.get(socket.id);
-    if (user) {
-      const room = rooms.get(user.roomId);
-      if (room) {
-        room.users.delete(socket.id);
-        
-        io.to(user.roomId).emit('userLeft', {
-          roomId: user.roomId,
-          user: { id: socket.id, username: user.username }
-        });
-
-        io.to(user.roomId).emit('roomUsers', {
-          roomId: user.roomId,
-          users: Array.from(room.users).map(uid => users.get(uid)).filter(Boolean)
-        });
-      }
-      
-      users.delete(socket.id);
-    }
-    console.log('User disconnected:', socket.id);
-  });
+  } catch (err) {
+    res.status(500).json({ error: 'Redis error' });
+  }
 });
 
-// API: Get all rooms
-app.get('/api/rooms', (req, res) => {
-  const roomList = Array.from(rooms.values()).map(room => ({
-    id: room.id,
-    name: room.name,
-    userCount: room.users.size,
-    messageCount: room.messages.length
-  }));
-  res.json(roomList);
+// Clear all cache
+app.delete('/api/cache/clear', async (req, res) => {
+  try {
+    await invalidateCache('product:*');
+    await invalidateCache('products:*');
+    res.json({ message: 'Cache cleared' });
+  } catch (err) {
+    res.status(500).json({ error: 'Redis error' });
+  }
 });
 
-// API: Get room messages
-app.get('/api/rooms/:roomId/messages', (req, res) => {
-  const room = rooms.get(req.params.roomId);
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-  res.json(room.messages.slice(-100));
-});
-
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
   res.json({ 
     status: 'ok', 
-    activeUsers: users.size,
-    totalRooms: rooms.size
+    redisConnected: redisClient.isOpen,
+    productsCount: products.length
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Chat server running on http://localhost:${PORT}`);
+init().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Cached API running on http://localhost:${PORT}`);
+  });
 });
