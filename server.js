@@ -1,14 +1,9 @@
-const { exec } = require('child_process');
-
-// Run a simple command
-exec('ls -la', (error, stdout, stderr) => {
+exec('node long-running-script.js', { timeout: 5000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
   if (error) {
-    console.error(`Error: ${error.message}`);
+    if (error.killed) console.log('Process was killed');
+    if (error.signal) console.log(`Process terminated by signal: ${error.signal}`);
+    console.error(`Execution error: ${error.message}`);
     return;
   }
-  if (stderr) {
-    console.error(`Stderr: ${stderr}`);
-    return;
-  }
-  console.log(`Output:\n${stdout}`);
+  console.log(stdout);
 });
