@@ -1,9 +1,10 @@
-exec('node long-running-script.js', { timeout: 5000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+const { execFile } = require('child_process');
+
+// Run a Python script
+execFile('python3', ['script.py', '--arg1', '--arg2'], (error, stdout, stderr) => {
   if (error) {
-    if (error.killed) console.log('Process was killed');
-    if (error.signal) console.log(`Process terminated by signal: ${error.signal}`);
-    console.error(`Execution error: ${error.message}`);
+    console.error(`Error: ${error.message}`);
     return;
   }
-  console.log(stdout);
+  console.log(`Python Output:\n${stdout}`);
 });
