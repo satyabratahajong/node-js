@@ -1,60 +1,95 @@
-const net = require('net');
+class RESPParser {
+  constructor() {
+    this.buffer = '';
+  }
 
-// In-memory store
-const store = new Map();
+  parse(data) {
+    this.buffer += data;
+    const messages = [];
 
-const server = net.createServer((socket) => {
-  console.log('Client connected:', socket.remoteAddress);
-
-  let buffer = '';
-
-  socket.on('data', (data) => {
-    buffer += data.toString();
-
-    // Process commands line by line
-    const lines = buffer.split('\r\n');
-    buffer = lines.pop(); // Keep incomplete line
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-
-      const parts = line.split(' ');
-      const command = parts[0].toUpperCase();
-
-      if (command === 'SET' && parts.length >= 3) {
-        const key = parts[1];
-        const value = parts.slice(2).join(' ');
-        store.set(key, value);
-        socket.write('+OK\r\n');
-      } else if (command === 'GET' && parts.length >= 2) {
-        const key = parts[1];
-        const value = store.get(key);
-        if (value !== undefined) {
-          socket.write(`$${value.length}\r\n${value}\r\n`);
-        } else {
-          socket.write('$-1\r\n'); // Null bulk reply
-        }
-      } else if (command === 'PING') {
-        socket.write('+PONG\r\n');
-      } else if (command === 'QUIT') {
-        socket.write('+OK\r\n');
-        socket.end();
-      } else {
-        socket.write('-ERR unknown command\r\n');
-      }
+    while (this.buffer.length > 0) {
+      const message = this.parseMessage();
+      if (message === null) break;
+      messages.push(message);
     }
-  });
 
-  socket.on('end', () => {
-    console.log('Client disconnected');
-  });
+    return messages;
+  }
 
-  socket.on('error', (err) => {
-    console.error('Socket error:', err.message);
-  });
-});
+  parseMessage() {
+    if (this.buffer.length === 0) return null;
 
-const PORT = 6379;
-server.listen(PORT, () => {
-  console.log(`Redis Clone listening on port ${PORT}`);
-});
+    const type = this.buffer[0];
+
+    if (type === '+') {
+      // Simple string
+      const end = this.buffer.indexOf('\r\n');
+      if (end === -1) return null;
+      const value = this.buffer.slice(1, end);
+      this.buffer = this.buffer.slice(end + 2);
+      return { type: 'simple-string', value };
+    }
+
+    if (type === '$') {
+      // Bulk string
+      const end = this.buffer.indexOf('\r\n');
+      if (end === -1) return null;
+      const length = parseInt(this.buffer.slice(1, end));
+      if (isNaN(length)) return null;
+
+      const contentStart = end + 2;
+      const contentEnd = contentStart + length + 2;
+
+      if (this.buffer.length < contentEnd) return null;
+
+      const value = this.buffer.slice(contentStart, contentEnd - 2);
+      this.buffer = this.buffer.slice(contentEnd);
+      return { type: 'bulk-string', value };
+    }
+
+    if (type === '*') {
+      // Array
+      const end = this.buffer.indexOf('\r\n');
+      if (end === -1) return null;
+      const count = parseInt(this.buffer.slice(1, end));
+      if (isNaN(count)) return null;
+
+      this.buffer = this.buffer.slice(end + 2);
+      const elements = [];
+
+      for (let i = 0; i < count; i++) {
+        const element = this.parseMessage();
+        if (element === null) {
+          // Put back the array header
+          this.buffer = `*${count}\r\n` + this.buffer;
+          return null;
+        }
+        elements.push(element);
+      }
+
+      return { type: 'array', value: elements };
+    }
+
+    if (type === ':') {
+      // Integer
+      const end = this.buffer.indexOf('\r\n');
+      if (end === -1) return null;
+      const value = parseInt(this.buffer.slice(1, end));
+      this.buffer = this.buffer.slice(end + 2);
+      return { type: 'integer', value };
+    }
+
+    if (type === '-') {
+      // Error
+      const end = this.buffer.indexOf('\r\n');
+      if (end === -1) return null;
+      const value = this.buffer.slice(1, end);
+      this.buffer = this.buffer.slice(end + 2);
+      return { type: 'error', value };
+    }
+
+    throw new Error(`Unknown RESP type: ${type}`);
+  }
+}
+
+module.exports = RESPParser;
