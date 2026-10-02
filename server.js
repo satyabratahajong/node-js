@@ -1,33 +1,51 @@
-const RateLimiter = require('./rateLimiter');
+const express = require('express');
+const rateLimitMiddleware = require('./middleware/rateLimitMiddleware');
 
-// Create limiter instance
-const limiter = new RateLimiter({
-  windowMs: 60 * 1000, // 1 minute
-  maxRequests: 10      // 10 requests per minute
+const app = express();
+const PORT = process.env.PORT || 3090;
+
+app.use(express.json());
+
+// Apply rate limiter globally
+app.use(rateLimitMiddleware);
+
+// Test endpoints
+app.get('/api/data', (req, res) => {
+  res.json({
+    message: 'Here is your data',
+    timestamp: new Date().toISOString(),
+    data: [1, 2, 3, 4, 5]
+  }); 
 });
 
-function rateLimitMiddleware(req, res, next) {
-  // Get client IP (handle proxies)
-  const ip = req.headers['x-forwarded-for']?.split(',')[0] || 
-             req.connection?.remoteAddress || 
-             'unknown';
-  
-  if (limiter.isAllowed(ip)) {
-    // Set rate limit headers
-    res.setHeader('X-RateLimit-Limit', limiter.maxRequests);
-    res.setHeader('X-RateLimit-Remaining', limiter.getRemaining(ip));
-    res.setHeader('X-RateLimit-Window', limiter.windowMs / 1000);
-    next();
-  } else {
-    res.setHeader('X-RateLimit-Limit', limiter.maxRequests);
-    res.setHeader('X-RateLimit-Remaining', 0);
-    res.setHeader('Retry-After', Math.ceil(limiter.windowMs / 1000));
-    res.status(429).json({
-      error: 'Too Many Requests',
-      message: 'Rate limit exceeded. Please try again later.',
-      retryAfter: Math.ceil(limiter.windowMs / 1000)
-    });
-  }
-}
+app.get('/api/users', (req, res) => {
+  res.json({
+    users: [
+      { id: 1, name: 'Alice' },
+      { id: 2, name: 'Bob' },
+      { id: 3, name: 'Charlie' }
+    ]
+  });
+});
 
-module.exports = rateLimitMiddleware; 
+app.post('/api/echo', (req, res) => {
+  res.json({
+    received: req.body,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
+});
+
+app.listen(PORT, () => {
+  console.log(`Rate Limiter API running on http://localhost:${PORT}`);
+  console.log(`Limit: 10 requests per minute per IP`);
+});
