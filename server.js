@@ -1,50 +1,33 @@
-class RateLimiter {
-  constructor({ windowMs = 60000, maxRequests = 100 }) {
-    this.windowMs = windowMs;
-    this.maxRequests = maxRequests;
-    this.requests = new Map(); // Map<ip, [timestamps]>
-    
-    // Cleanup old entries every minute
-    setInterval(() => this.cleanup(), 60000);
-  }
+const RateLimiter = require('./rateLimiter');
 
-  cleanup() {
-    const now = Date.now();
-    for (const [ip, timestamps] of this.requests.entries()) {
-      const valid = timestamps.filter(ts => now - ts < this.windowMs);
-      if (valid.length === 0) {
-        this.requests.delete(ip);
-      } else {
-        this.requests.set(ip, valid);
-      }
-    }
-  }
+// Create limiter instance
+const limiter = new RateLimiter({
+  windowMs: 60 * 1000, // 1 minute
+  maxRequests: 10      // 10 requests per minute
+});
 
-  isAllowed(ip) {
-    const now = Date.now();
-    const windowStart = now - this.windowMs;
-    
-    let timestamps = this.requests.get(ip) || [];
-    // Filter to only requests within the current window
-    timestamps = timestamps.filter(ts => ts > windowStart);
-    
-    if (timestamps.length >= this.maxRequests) {
-      this.requests.set(ip, timestamps);
-      return false;
-    }
-    
-    timestamps.push(now);
-    this.requests.set(ip, timestamps);
-    return true;
-  }
-
-  getRemaining(ip) {
-    const now = Date.now();
-    const windowStart = now - this.windowMs;
-    const timestamps = (this.requests.get(ip) || [])
-      .filter(ts => ts > windowStart);
-    return Math.max(0, this.maxRequests - timestamps.length);
+function rateLimitMiddleware(req, res, next) {
+  // Get client IP (handle proxies)
+  const ip = req.headers['x-forwarded-for']?.split(',')[0] || 
+             req.connection?.remoteAddress || 
+             'unknown';
+  
+  if (limiter.isAllowed(ip)) {
+    // Set rate limit headers
+    res.setHeader('X-RateLimit-Limit', limiter.maxRequests);
+    res.setHeader('X-RateLimit-Remaining', limiter.getRemaining(ip));
+    res.setHeader('X-RateLimit-Window', limiter.windowMs / 1000);
+    next();
+  } else {
+    res.setHeader('X-RateLimit-Limit', limiter.maxRequests);
+    res.setHeader('X-RateLimit-Remaining', 0);
+    res.setHeader('Retry-After', Math.ceil(limiter.windowMs / 1000));
+    res.status(429).json({
+      error: 'Too Many Requests',
+      message: 'Rate limit exceeded. Please try again later.',
+      retryAfter: Math.ceil(limiter.windowMs / 1000)
+    });
   }
 }
 
-module.exports = RateLimiter;
+module.exports = rateLimitMiddleware; 
