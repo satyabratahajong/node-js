@@ -1,147 +1,117 @@
+const { json } = require("body-parser");
 const express = require("express");
-const Database = require("better-sqlite3");
+const http = require("http");
+const path = require("path");
+const { WebSocketServer } = require("ws");
 
 const app = express();
-const PORT = 3002;
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
-const db = new Database("expenses.db");
+const PORT = 3000;
+const clients = new Map();
 
-app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS expenses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    amount REAL NOT NULL,
-    category TEXT NOT NULL,
-    expense_date TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+function broadcast(message) {
+  const data = JSON.stringify(message);
 
-app.get("/", (req, res) => {
-  res.json({
-    message: "Expense Tracker API",
-    endpoints: [
-      "GET /expenses",
-      "POST /expenses",
-      "DELETE /expenses/:id",
-      "GET /expenses/summary"
-    ]
+  for (const client of wss.clients) {
+    if (client.readyState === 1) {
+      client.send(data);
+    }
+  }
+}
+
+function broadcastUserCount() {
+  broadcast({
+    type: "userCount",
+    count: clients.size
   });
-});
+}
 
-app.get("/expenses", (req, res) => {
-  const { category } = req.query;
+wss.on("connection", (socket) => {
+  let username = null;
 
-  let expenses;
-
-  if (category) {
-    expenses = db
-      .prepare(
-        "SELECT * FROM expenses WHERE category = ? ORDER BY expense_date DESC"
-      )
-      .all(category);
-  } else {
-    expenses = db
-      .prepare("SELECT * FROM expenses ORDER BY expense_date DESC")
-      .all();
-  }
-
-  res.json(expenses);
-});
-
-app.post("/expenses", (req, res) => {
-  const {
-    title,
-    amount,
-    category,
-    expenseDate
-  } = req.body;
-
-  if (!title || !category || !expenseDate) {
-    return res.status(400).json({
-      error: "title, category and expenseDate are required"
-    });
-  }
-
-  if (typeof amount !== "number" || amount <= 0) {
-    return res.status(400).json({
-      error: "amount must be a positive number"
-    });
-  }
-
-  const statement = db.prepare(`
-    INSERT INTO expenses
-    (title, amount, category, expense_date)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  const result = statement.run(
-    title,
-    amount,
-    category,
-    expenseDate
+  socket.send(
+    JSON.stringify({
+      type: "system",
+      text: "Connected to the chat server."
+    })
   );
 
-  const expense = db
-    .prepare("SELECT * FROM expenses WHERE id = ?")
-    .get(result.lastInsertRowid);
+  socket.on("message", (rawMessage) => {
+    try {
+      const message = JSON.parse(rawMessage.toString());
 
-  res.status(201).json(expense);
-});
+      if (message.type === "join") {
+        username = String(message.username || "Anonymous")
+          .trim()
+          .slice(0, 20);
 
-app.delete("/expenses/:id", (req, res) => {
-  const result = db
-    .prepare("DELETE FROM expenses WHERE id = ?")
-    .run(req.params.id);
+        if (!username) {
+          username = "Anonymous";
+        }
 
-  if (result.changes === 0) {
-    return res.status(404).json({
-      error: "Expense not found"
-    });
-  }
+        clients.set(socket, username);
 
-  res.json({
-    message: "Expense deleted successfully"
+        broadcast({
+          type: "system",
+          text: `${username} joined the chat.`
+        });
+
+        broadcastUserCount();
+        return;
+      }
+
+      if (message.type === "chat") {
+        if (!username) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              text: "Join the chat before sending messages."
+            })
+          );
+          return;
+        }
+
+        const text = String(message.text || "").trim();
+
+        if (!text) {
+          return;
+        }
+
+        broadcast({
+          type: "chat",
+          username,
+          text: text.slice(0, 500),
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      socket.send(
+        JSON.stringify({
+          type: "error",
+          text: "Invalid message format."
+        })
+      );
+    }
+  });
+
+  socket.on("close", () => {
+    if (username) {
+      clients.delete(socket);
+
+      broadcast({
+        type: "system",
+        text: `${username} left the chat.`
+      });
+
+      broadcastUserCount();
+    }
   });
 });
 
-app.get("/expenses/summary", (req, res) => {
-  const total = db
-    .prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM expenses")
-    .get();
-
-  const byCategory = db
-    .prepare(`
-      SELECT
-        category,
-        SUM(amount) AS total,
-        COUNT(*) AS count
-      FROM expenses
-      GROUP BY category
-      ORDER BY total DESC
-    `)
-    .all();
-
-  const monthly = db
-    .prepare(`
-      SELECT
-        substr(expense_date, 1, 7) AS month,
-        SUM(amount) AS total
-      FROM expenses
-      GROUP BY month
-      ORDER BY month DESC
-    `)
-    .all();
-
-  res.json({
-    total: Number(total.total.toFixed(2)),
-    byCategory,
-    monthly
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`Expense API running at http://localhost:${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Chat app running at http://localhost:${PORT}`);
 }); 
