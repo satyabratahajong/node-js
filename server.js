@@ -1,138 +1,116 @@
 const express = require("express");
-const multer = require("multer");
+const http = require("http");
 const path = require("path");
-const fs = require("fs");
+const { WebSocketServer } = require("ws");
 
 const app = express();
-const PORT = 3001;
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
-const uploadDirectory = path.join(__dirname, "uploads");
+const PORT = 3000;
+const clients = new Map();
 
-if (!fs.existsSync(uploadDirectory)) {
-  fs.mkdirSync(uploadDirectory, { recursive: true });
+app.use(express.static(path.join(__dirname, "public")));
+
+function broadcast(message) {
+  const data = JSON.stringify(message);
+
+  for (const client of wss.clients) {
+    if (client.readyState === 1) {
+      client.send(data);
+    }
+  }
 }
 
-const storage = multer.diskStorage({
-  destination: (req, file, callback) => {
-    callback(null, uploadDirectory);
-  },
+function broadcastUserCount() {
+  broadcast({
+    type: "userCount",
+    count: clients.size
+  });
+}
 
-  filename: (req, file, callback) => {
-    const extension = path.extname(file.originalname).toLowerCase();
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
+wss.on("connection", (socket) => {
+  let username = null;
 
-    callback(null, uniqueName);
-  }
-});
-
-const allowedMimeTypes = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp"
-];
-
-const upload = multer({
-  storage,
-
-  limits: {
-    fileSize: 5 * 1024 * 1024
-  },
-
-  fileFilter: (req, file, callback) => {
-    if (allowedMimeTypes.includes(file.mimetype)) {
-      callback(null, true);
-    } else {
-      callback(new Error("Only JPEG, PNG, GIF and WEBP files are allowed."));
-    }
-  }
-});
-
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
-app.use("/uploads", express.static(uploadDirectory));
-
-app.get("/api/images", (req, res) => {
-  const files = fs
-    .readdirSync(uploadDirectory)
-    .filter((file) => {
-      return /\.(jpg|jpeg|png|gif|webp)$/i.test(file);
+  socket.send(
+    JSON.stringify({
+      type: "system",
+      text: "Connected to the chat server."
     })
-    .map((file) => {
-      const filePath = path.join(uploadDirectory, file);
-      const fileStats = fs.statSync(filePath);
+  );
 
-      return {
-        filename: file,
-        url: `/uploads/${file}`,
-        size: fileStats.size,
-        uploadedAt: fileStats.mtime
-      };
-    })
-    .sort((a, b) => {
-      return new Date(b.uploadedAt) - new Date(a.uploadedAt);
-    });
+  socket.on("message", (rawMessage) => {
+    try {
+      const message = JSON.parse(rawMessage.toString());
 
-  res.json(files);
-});
+      if (message.type === "join") {
+        username = String(message.username || "Anonymous")
+          .trim()
+          .slice(0, 20);
 
-app.post("/api/upload", upload.single("image"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({
-      error: "Please upload an image."
-    });
-  }
+        if (!username) {
+          username = "Anonymous";
+        }
 
-  res.status(201).json({
-    message: "Image uploaded successfully.",
-    image: {
-      filename: req.file.filename,
-      originalName: req.file.originalname,
-      size: req.file.size,
-      url: `/uploads/${req.file.filename}`
+        clients.set(socket, username);
+
+        broadcast({
+          type: "system",
+          text: `${username} joined the chat.`
+        });
+
+        broadcastUserCount();
+        return;
+      }
+
+      if (message.type === "chat") {
+        if (!username) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              text: "Join the chat before sending messages."
+            })
+          );
+          return;
+        }
+
+        const text = String(message.text || "").trim();
+
+        if (!text) {
+          return;
+        }
+
+        broadcast({
+          type: "chat",
+          username,
+          text: text.slice(0, 500),
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      socket.send(
+        JSON.stringify({
+          type: "error",
+          text: "Invalid message format."
+        })
+      );
     }
   });
-});
 
-app.delete("/api/images/:filename", (req, res) => {
-  const safeFilename = path.basename(req.params.filename);
-  const filePath = path.join(uploadDirectory, safeFilename);
+  socket.on("close", () => {
+    if (username) {
+      clients.delete(socket);
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({
-      error: "Image not found."
-    });
-  }
-
-  fs.unlinkSync(filePath);
-
-  res.json({
-    message: "Image deleted successfully."
-  });
-});
-
-app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === "LIMIT_FILE_SIZE") {
-      return res.status(400).json({
-        error: "File size cannot exceed 5 MB."
+      broadcast({
+        type: "system",
+        text: `${username} left the chat.`
       });
+
+      broadcastUserCount();
     }
-
-    return res.status(400).json({
-      error: error.message
-    });
-  }
-
-  if (error) {
-    return res.status(400).json({
-      error: error.message
-    });
-  }
-
-  next();
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`Image gallery running at http://localhost:${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Chat app running at http://localhost:${PORT}`);
 }); 
