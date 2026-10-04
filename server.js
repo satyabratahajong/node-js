@@ -1,192 +1,138 @@
-require("dotenv").config();
-
 const express = require("express");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const Database = require("better-sqlite3");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
-const PORT = process.env.PORT || 3003;
-const JWT_SECRET = process.env.JWT_SECRET;
+const PORT = 3001;
 
-if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET is missing from the .env file");
+const uploadDirectory = path.join(__dirname, "uploads");
+
+if (!fs.existsSync(uploadDirectory)) {
+  fs.mkdirSync(uploadDirectory, { recursive: true });
 }
 
-const db = new Database("users.db");
+const storage = multer.diskStorage({
+  destination: (req, file, callback) => {
+    callback(null, uploadDirectory);
+  },
+
+  filename: (req, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
+
+    callback(null, uniqueName);
+  }
+});
+
+const allowedMimeTypes = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp"
+];
+
+const upload = multer({
+  storage,
+
+  limits: {
+    fileSize: 5 * 1024 * 1024
+  },
+
+  fileFilter: (req, file, callback) => {
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Only JPEG, PNG, GIF and WEBP files are allowed."));
+    }
+  }
+});
 
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
+app.use("/uploads", express.static(uploadDirectory));
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+app.get("/api/images", (req, res) => {
+  const files = fs
+    .readdirSync(uploadDirectory)
+    .filter((file) => {
+      return /\.(jpg|jpeg|png|gif|webp)$/i.test(file);
+    })
+    .map((file) => {
+      const filePath = path.join(uploadDirectory, file);
+      const fileStats = fs.statSync(filePath);
 
-function createToken(user) {
-  return jwt.sign(
-    {
-      id: user.id,
-      email: user.email
-    },
-    JWT_SECRET,
-    {
-      expiresIn: "2h"
-    }
-  );
-}
-
-function authenticateToken(req, res, next) {
-  const authorization = req.headers.authorization;
-
-  if (!authorization || !authorization.startsWith("Bearer ")) {
-    return res.status(401).json({
-      error: "Access token is required"
+      return {
+        filename: file,
+        url: `/uploads/${file}`,
+        size: fileStats.size,
+        uploadedAt: fileStats.mtime
+      };
+    })
+    .sort((a, b) => {
+      return new Date(b.uploadedAt) - new Date(a.uploadedAt);
     });
-  }
 
-  const token = authorization.substring("Bearer ".length);
-
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    return res.status(401).json({
-      error: "Invalid or expired token"
-    });
-  }
-}
-
-app.post("/register", async (req, res, next) => {
-  try {
-    const { name, email, password } = req.body;
-
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        error: "name, email and password are required"
-      });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({
-        error: "Password must contain at least 6 characters"
-      });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-
-    const existingUser = db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .get(normalizedEmail);
-
-    if (existingUser) {
-      return res.status(409).json({
-        error: "Email is already registered"
-      });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 12);
-
-    const result = db
-      .prepare(`
-        INSERT INTO users (name, email, password_hash)
-        VALUES (?, ?, ?)
-      `)
-      .run(name.trim(), normalizedEmail, passwordHash);
-
-    const user = {
-      id: result.lastInsertRowid,
-      name: name.trim(),
-      email: normalizedEmail
-    };
-
-    res.status(201).json({
-      message: "Registration successful",
-      user,
-      token: createToken(user)
-    });
-  } catch (error) {
-    next(error);
-  }
+  res.json(files);
 });
 
-app.post("/login", async (req, res, next) => {
-  try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({
-        error: "Email and password are required"
-      });
-    }
-
-    const user = db
-      .prepare("SELECT * FROM users WHERE email = ?")
-      .get(email.trim().toLowerCase());
-
-    if (!user) {
-      return res.status(401).json({
-        error: "Invalid email or password"
-      });
-    }
-
-    const validPassword = await bcrypt.compare(
-      password,
-      user.password_hash
-    );
-
-    if (!validPassword) {
-      return res.status(401).json({
-        error: "Invalid email or password"
-      });
-    }
-
-    const publicUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email
-    };
-
-    res.json({
-      message: "Login successful",
-      user: publicUser,
-      token: createToken(publicUser)
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get("/profile", authenticateToken, (req, res) => {
-  const user = db
-    .prepare(`
-      SELECT id, name, email, created_at
-      FROM users
-      WHERE id = ?
-    `)
-    .get(req.user.id);
-
-  if (!user) {
-    return res.status(404).json({
-      error: "User not found"
+app.post("/api/upload", upload.single("image"), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({
+      error: "Please upload an image."
     });
   }
 
-  res.json(user);
-});
-
-app.use((error, req, res, next) => {
-  console.error(error);
-
-  res.status(500).json({
-    error: "Internal server error"
+  res.status(201).json({
+    message: "Image uploaded successfully.",
+    image: {
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      size: req.file.size,
+      url: `/uploads/${req.file.filename}`
+    }
   });
 });
 
+app.delete("/api/images/:filename", (req, res) => {
+  const safeFilename = path.basename(req.params.filename);
+  const filePath = path.join(uploadDirectory, safeFilename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      error: "Image not found."
+    });
+  }
+
+  fs.unlinkSync(filePath);
+
+  res.json({
+    message: "Image deleted successfully."
+  });
+});
+
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        error: "File size cannot exceed 5 MB."
+      });
+    }
+
+    return res.status(400).json({
+      error: error.message
+    });
+  }
+
+  if (error) {
+    return res.status(400).json({
+      error: error.message
+    });
+  }
+
+  next();
+});
+
 app.listen(PORT, () => {
-  console.log(`Auth API running at http://localhost:${PORT}`);
+  console.log(`Image gallery running at http://localhost:${PORT}`);
 }); 
