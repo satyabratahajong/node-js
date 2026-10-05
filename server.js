@@ -1,137 +1,155 @@
 const express = require("express");
-const fs = require("node:fs/promises");
-const path = require("node:path");
 const crypto = require("node:crypto");
+const Database = require("better-sqlite3");
 
 const app = express();
-const PORT = 3000;
+const PORT = 3004;
 
-const dataDirectory = path.join(__dirname, "data");
-const dataFile = path.join(dataDirectory, "tasks.json");
+const db = new Database("urls.db");
 
 app.use(express.json());
 
-async function ensureDatabase() {
-  await fs.mkdir(dataDirectory, { recursive: true });
+db.exec(`
+  CREATE TABLE IF NOT EXISTS urls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    short_code TEXT NOT NULL UNIQUE,
+    original_url TEXT NOT NULL,
+    clicks INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )
+`);
 
-  try {
-    await fs.access(dataFile);
-  } catch {
-    await fs.writeFile(dataFile, "[]");
+function createShortCode(length = 6) {
+  const characters =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+  const randomBytes = crypto.randomBytes(length);
+
+  let code = "";
+
+  for (let index = 0; index < length; index++) {
+    code += characters[randomBytes[index] % characters.length];
   }
+
+  return code;
 }
 
-async function readTasks() {
-  const data = await fs.readFile(dataFile, "utf-8");
-  return JSON.parse(data);
-}
+function isValidUrl(value) {
+  try {
+    const url = new URL(value);
 
-async function saveTasks(tasks) {
-  await fs.writeFile(dataFile, JSON.stringify(tasks, null, 2));
+    return url.protocol === "http:" ||
+      url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 app.get("/", (req, res) => {
   res.json({
-    message: "Task Manager API",
+    message: "URL Shortener API",
     endpoints: [
-      "GET /tasks",
-      "POST /tasks",
-      "PUT /tasks/:id",
-      "DELETE /tasks/:id"
+      "POST /api/shorten",
+      "GET /api/urls"
     ]
   });
 });
 
-app.get("/tasks", async (req, res) => {
-  try {
-    const tasks = await readTasks();
-    res.json(tasks);
-  } catch (error) {
-    res.status(500).json({ error: "Could not read tasks" });
-  }
-});
+app.post("/api/shorten", (req, res) => {
+  const { originalUrl, customCode } = req.body;
 
-app.post("/tasks", async (req, res) => {
-  try {
-    const { title, description = "" } = req.body;
-
-    if (!title || title.trim() === "") {
-      return res.status(400).json({
-        error: "Task title is required"
-      });
-    }
-
-    const tasks = await readTasks();
-
-    const newTask = {
-      id: crypto.randomUUID(),
-      title: title.trim(),
-      description,
-      completed: false,
-      createdAt: new Date().toISOString()
-    };
-
-    tasks.push(newTask);
-    await saveTasks(tasks);
-
-    res.status(201).json(newTask);
-  } catch (error) {
-    res.status(500).json({ error: "Could not create task" });
-  }
-});
-
-app.put("/tasks/:id", async (req, res) => {
-  try {
-    const tasks = await readTasks();
-    const taskIndex = tasks.findIndex((task) => task.id === req.params.id);
-
-    if (taskIndex === -1) {
-      return res.status(404).json({
-        error: "Task not found"
-      });
-    }
-
-    const currentTask = tasks[taskIndex];
-
-    tasks[taskIndex] = {
-      ...currentTask,
-      title: req.body.title ?? currentTask.title,
-      description: req.body.description ?? currentTask.description,
-      completed: req.body.completed ?? currentTask.completed,
-      updatedAt: new Date().toISOString()
-    };
-
-    await saveTasks(tasks);
-
-    res.json(tasks[taskIndex]);
-  } catch (error) {
-    res.status(500).json({ error: "Could not update task" });
-  }
-});
-
-app.delete("/tasks/:id", async (req, res) => {
-  try {
-    const tasks = await readTasks();
-    const filteredTasks = tasks.filter((task) => task.id !== req.params.id);
-
-    if (filteredTasks.length === tasks.length) {
-      return res.status(404).json({
-        error: "Task not found"
-      });
-    }
-
-    await saveTasks(filteredTasks);
-
-    res.json({
-      message: "Task deleted successfully"
+  if (!originalUrl || !isValidUrl(originalUrl)) {
+    return res.status(400).json({
+      error: "A valid HTTP or HTTPS URL is required"
     });
-  } catch (error) {
-    res.status(500).json({ error: "Could not delete task" });
   }
+
+  let shortCode = customCode
+    ? String(customCode).trim()
+    : createShortCode();
+
+  if (!/^[A-Za-z0-9_-]{3,20}$/.test(shortCode)) {
+    return res.status(400).json({
+      error: "Code must contain 3 to 20 letters, numbers, underscores or hyphens"
+    });
+  }
+
+  const existingCode = db
+    .prepare("SELECT id FROM urls WHERE short_code = ?")
+    .get(shortCode);
+
+  if (existingCode) {
+    if (customCode) {
+      return res.status(409).json({
+        error: "This custom code is already in use"
+      });
+    }
+
+    shortCode = createShortCode();
+  }
+
+  const result = db
+    .prepare(`
+      INSERT INTO urls (short_code, original_url)
+      VALUES (?, ?)
+    `)
+    .run(shortCode, originalUrl);
+
+  res.status(201).json({
+    id: result.lastInsertRowid,
+    originalUrl,
+    shortCode,
+    shortUrl: `http://localhost:${PORT}/${shortCode}`
+  });
 });
 
-ensureDatabase().then(() => {
-  app.listen(PORT, () => {
-    console.log(`Task API running at http://localhost:${PORT}`);
+app.get("/api/urls", (req, res) => {
+  const urls = db
+    .prepare(`
+      SELECT
+        id,
+        short_code,
+        original_url,
+        clicks,
+        created_at
+      FROM urls
+      ORDER BY created_at DESC
+    `)
+    .all();
+
+  res.json(urls);
+});
+
+app.get("/:shortCode", (req, res) => {
+  const url = db
+    .prepare(`
+      SELECT *
+      FROM urls
+      WHERE short_code = ?
+    `)
+    .get(req.params.shortCode);
+
+  if (!url) {
+    return res.status(404).send("Short URL not found");
+  }
+
+  db.prepare(`
+    UPDATE urls
+    SET clicks = clicks + 1
+    WHERE id = ?
+  `).run(url.id);
+
+  res.redirect(url.original_url);
+});
+
+app.use((error, req, res, next) => {
+  console.error(error);
+
+  res.status(500).json({
+    error: "Internal server error"
   });
-}); 
+});
+
+app.listen(PORT, () => {
+  console.log(`URL shortener running at http://localhost:${PORT}`);
+});
