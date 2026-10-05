@@ -1,147 +1,95 @@
 const express = require("express");
-const Database = require("better-sqlite3");
 
 const app = express();
-const PORT = 3002;
-
-const db = new Database("expenses.db");
+const PORT = 3001;
 
 app.use(express.json());
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS expenses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    amount REAL NOT NULL,
-    category TEXT NOT NULL,
-    expense_date TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+const readings = [];
 
 app.get("/", (req, res) => {
   res.json({
-    message: "Expense Tracker API",
+    message: "IoT Sensor Data API",
     endpoints: [
-      "GET /expenses",
-      "POST /expenses",
-      "DELETE /expenses/:id",
-      "GET /expenses/summary"
+      "POST /readings",
+      "GET /readings",
+      "GET /readings/summary"
     ]
   });
 });
 
-app.get("/expenses", (req, res) => {
-  const { category } = req.query;
+app.post("/readings", (req, res) => {
+  const { deviceId, temperature, humidity } = req.body;
 
-  let expenses;
-
-  if (category) {
-    expenses = db
-      .prepare(
-        "SELECT * FROM expenses WHERE category = ? ORDER BY expense_date DESC"
-      )
-      .all(category);
-  } else {
-    expenses = db
-      .prepare("SELECT * FROM expenses ORDER BY expense_date DESC")
-      .all();
+  if (!deviceId) {
+    return res.status(400).json({
+      error: "deviceId is required"
+    });
   }
 
-  res.json(expenses);
+  if (
+    typeof temperature !== "number" ||
+    typeof humidity !== "number"
+  ) {
+    return res.status(400).json({
+      error: "temperature and humidity must be numbers"
+    });
+  }
+
+  const reading = {
+    id: readings.length + 1,
+    deviceId,
+    temperature,
+    humidity,
+    receivedAt: new Date().toISOString()
+  };
+
+  readings.push(reading);
+
+  res.status(201).json(reading);
 });
 
-app.post("/expenses", (req, res) => {
-  const {
-    title,
-    amount,
-    category,
-    expenseDate
-  } = req.body;
+app.get("/readings", (req, res) => {
+  const { deviceId } = req.query;
 
-  if (!title || !category || !expenseDate) {
-    return res.status(400).json({
-      error: "title, category and expenseDate are required"
-    });
+  if (deviceId) {
+    return res.json(
+      readings.filter((reading) => reading.deviceId === deviceId)
+    );
   }
 
-  if (typeof amount !== "number" || amount <= 0) {
-    return res.status(400).json({
-      error: "amount must be a positive number"
-    });
-  }
-
-  const statement = db.prepare(`
-    INSERT INTO expenses
-    (title, amount, category, expense_date)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  const result = statement.run(
-    title,
-    amount,
-    category,
-    expenseDate
-  );
-
-  const expense = db
-    .prepare("SELECT * FROM expenses WHERE id = ?")
-    .get(result.lastInsertRowid);
-
-  res.status(201).json(expense);
+  res.json(readings);
 });
 
-app.delete("/expenses/:id", (req, res) => {
-  const result = db
-    .prepare("DELETE FROM expenses WHERE id = ?")
-    .run(req.params.id);
-
-  if (result.changes === 0) {
-    return res.status(404).json({
-      error: "Expense not found"
+app.get("/readings/summary", (req, res) => {
+  if (readings.length === 0) {
+    return res.json({
+      count: 0,
+      message: "No sensor readings available"
     });
   }
+
+  const temperatures = readings.map((reading) => reading.temperature);
+  const humidities = readings.map((reading) => reading.humidity);
+
+  const average = (values) =>
+    values.reduce((sum, value) => sum + value, 0) / values.length;
 
   res.json({
-    message: "Expense deleted successfully"
-  });
-});
-
-app.get("/expenses/summary", (req, res) => {
-  const total = db
-    .prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM expenses")
-    .get();
-
-  const byCategory = db
-    .prepare(`
-      SELECT
-        category,
-        SUM(amount) AS total,
-        COUNT(*) AS count
-      FROM expenses
-      GROUP BY category
-      ORDER BY total DESC
-    `)
-    .all();
-
-  const monthly = db
-    .prepare(`
-      SELECT
-        substr(expense_date, 1, 7) AS month,
-        SUM(amount) AS total
-      FROM expenses
-      GROUP BY month
-      ORDER BY month DESC
-    `)
-    .all();
-
-  res.json({
-    total: Number(total.total.toFixed(2)),
-    byCategory,
-    monthly
+    count: readings.length,
+    temperature: {
+      average: Number(average(temperatures).toFixed(2)),
+      minimum: Math.min(...temperatures),
+      maximum: Math.max(...temperatures)
+    },
+    humidity: {
+      average: Number(average(humidities).toFixed(2)),
+      minimum: Math.min(...humidities),
+      maximum: Math.max(...humidities)
+    }
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`Expense API running at http://localhost:${PORT}`);
+  console.log(`IoT API running at http://localhost:${PORT}`);
 }); 
