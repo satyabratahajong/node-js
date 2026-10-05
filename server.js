@@ -1,155 +1,131 @@
-const express = require("express");
-const crypto = require("node:crypto");
-const Database = require("better-sqlite3");
+const os = require("node:os");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
 
-const app = express();
-const PORT = 3004;
-
-const db = new Database("urls.db");
-
-app.use(express.json());
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS urls (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    short_code TEXT NOT NULL UNIQUE,
-    original_url TEXT NOT NULL,
-    clicks INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )
-`);
-
-function createShortCode(length = 6) {
-  const characters =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-  const randomBytes = crypto.randomBytes(length);
-
-  let code = "";
-
-  for (let index = 0; index < length; index++) {
-    code += characters[randomBytes[index] % characters.length];
-  }
-
-  return code;
+function bytesToGB(bytes) {
+  return (bytes / 1024 / 1024 / 1024).toFixed(2);
 }
 
-function isValidUrl(value) {
+function getSystemInfo() {
+  const cpus = os.cpus();
+
+  return {
+    hostname: os.hostname(),
+    platform: os.platform(),
+    operatingSystem: os.type(),
+    architecture: os.arch(),
+    release: os.release(),
+    username: os.userInfo().username,
+    cpuModel: cpus[0]?.model || "Unknown",
+    cpuCores: cpus.length,
+    totalMemoryGB: bytesToGB(os.totalmem()),
+    freeMemoryGB: bytesToGB(os.freemem()),
+    uptimeHours: (os.uptime() / 3600).toFixed(2),
+    homeDirectory: os.homedir(),
+    currentDirectory: process.cwd(),
+    generatedAt: new Date().toISOString()
+  };
+}
+
+function displayInfo(info) {
+  console.table(info);
+}
+
+async function saveReport(info) {
+  const reportsDirectory = path.join(process.cwd(), "reports");
+
+  await fs.mkdir(reportsDirectory, {
+    recursive: true
+  });
+
+  const filename = `system-report-${Date.now()}.json`;
+  const filePath = path.join(reportsDirectory, filename);
+
+  await fs.writeFile(
+    filePath,
+    JSON.stringify(info, null, 2)
+  );
+
+  console.log(`Report saved to: ${filePath}`);
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const processInstance = spawn(command, args, {
+      shell: process.platform === "win32"
+    });
+
+    let output = "";
+    let errorOutput = "";
+
+    processInstance.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+
+    processInstance.stderr.on("data", (data) => {
+      errorOutput += data.toString();
+    });
+
+    processInstance.on("error", reject);
+
+    processInstance.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(errorOutput || `Command exited with code ${code}`));
+        return;
+      }
+
+      resolve(output);
+    });
+  });
+}
+
+async function showNetworkInformation() {
   try {
-    const url = new URL(value);
+    const command = process.platform === "win32"
+      ? "ipconfig"
+      : "ifconfig";
 
-    return url.protocol === "http:" ||
-      url.protocol === "https:";
-  } catch {
-    return false;
+    const output = await runCommand(command, []);
+
+    console.log(output);
+  } catch (error) {
+    console.error("Could not retrieve network information.");
+    console.error(error.message);
   }
 }
 
-app.get("/", (req, res) => {
-  res.json({
-    message: "URL Shortener API",
-    endpoints: [
-      "POST /api/shorten",
-      "GET /api/urls"
-    ]
-  });
-});
+async function main() {
+  const command = process.argv[2];
 
-app.post("/api/shorten", (req, res) => {
-  const { originalUrl, customCode } = req.body;
-
-  if (!originalUrl || !isValidUrl(originalUrl)) {
-    return res.status(400).json({
-      error: "A valid HTTP or HTTPS URL is required"
-    });
+  if (command === "info") {
+    const info = getSystemInfo();
+    displayInfo(info);
+    return;
   }
 
-  let shortCode = customCode
-    ? String(customCode).trim()
-    : createShortCode();
-
-  if (!/^[A-Za-z0-9_-]{3,20}$/.test(shortCode)) {
-    return res.status(400).json({
-      error: "Code must contain 3 to 20 letters, numbers, underscores or hyphens"
-    });
+  if (command === "save") {
+    const info = getSystemInfo();
+    await saveReport(info);
+    return;
   }
 
-  const existingCode = db
-    .prepare("SELECT id FROM urls WHERE short_code = ?")
-    .get(shortCode);
-
-  if (existingCode) {
-    if (customCode) {
-      return res.status(409).json({
-        error: "This custom code is already in use"
-      });
-    }
-
-    shortCode = createShortCode();
+  if (command === "network") {
+    await showNetworkInformation();
+    return;
   }
 
-  const result = db
-    .prepare(`
-      INSERT INTO urls (short_code, original_url)
-      VALUES (?, ?)
-    `)
-    .run(shortCode, originalUrl);
+  console.log(`
+System Information CLI
 
-  res.status(201).json({
-    id: result.lastInsertRowid,
-    originalUrl,
-    shortCode,
-    shortUrl: `http://localhost:${PORT}/${shortCode}`
-  });
-});
+Usage:
+  node system-info.js info
+  node system-info.js save
+  node system-info.js network
+`);
+}
 
-app.get("/api/urls", (req, res) => {
-  const urls = db
-    .prepare(`
-      SELECT
-        id,
-        short_code,
-        original_url,
-        clicks,
-        created_at
-      FROM urls
-      ORDER BY created_at DESC
-    `)
-    .all();
-
-  res.json(urls);
-});
-
-app.get("/:shortCode", (req, res) => {
-  const url = db
-    .prepare(`
-      SELECT *
-      FROM urls
-      WHERE short_code = ?
-    `)
-    .get(req.params.shortCode);
-
-  if (!url) {
-    return res.status(404).send("Short URL not found");
-  }
-
-  db.prepare(`
-    UPDATE urls
-    SET clicks = clicks + 1
-    WHERE id = ?
-  `).run(url.id);
-
-  res.redirect(url.original_url);
-});
-
-app.use((error, req, res, next) => {
-  console.error(error);
-
-  res.status(500).json({
-    error: "Internal server error"
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`URL shortener running at http://localhost:${PORT}`);
+main().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
 });
