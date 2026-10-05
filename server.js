@@ -1,95 +1,137 @@
 const express = require("express");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const crypto = require("node:crypto");
 
 const app = express();
-const PORT = 3001;
+const PORT = 3000;
+
+const dataDirectory = path.join(__dirname, "data");
+const dataFile = path.join(dataDirectory, "tasks.json");
 
 app.use(express.json());
 
-const readings = [];
+async function ensureDatabase() {
+  await fs.mkdir(dataDirectory, { recursive: true });
+
+  try {
+    await fs.access(dataFile);
+  } catch {
+    await fs.writeFile(dataFile, "[]");
+  }
+}
+
+async function readTasks() {
+  const data = await fs.readFile(dataFile, "utf-8");
+  return JSON.parse(data);
+}
+
+async function saveTasks(tasks) {
+  await fs.writeFile(dataFile, JSON.stringify(tasks, null, 2));
+}
 
 app.get("/", (req, res) => {
   res.json({
-    message: "IoT Sensor Data API",
+    message: "Task Manager API",
     endpoints: [
-      "POST /readings",
-      "GET /readings",
-      "GET /readings/summary"
+      "GET /tasks",
+      "POST /tasks",
+      "PUT /tasks/:id",
+      "DELETE /tasks/:id"
     ]
   });
 });
 
-app.post("/readings", (req, res) => {
-  const { deviceId, temperature, humidity } = req.body;
-
-  if (!deviceId) {
-    return res.status(400).json({
-      error: "deviceId is required"
-    });
+app.get("/tasks", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    res.json(tasks);
+  } catch (error) {
+    res.status(500).json({ error: "Could not read tasks" });
   }
-
-  if (
-    typeof temperature !== "number" ||
-    typeof humidity !== "number"
-  ) {
-    return res.status(400).json({
-      error: "temperature and humidity must be numbers"
-    });
-  }
-
-  const reading = {
-    id: readings.length + 1,
-    deviceId,
-    temperature,
-    humidity,
-    receivedAt: new Date().toISOString()
-  };
-
-  readings.push(reading);
-
-  res.status(201).json(reading);
 });
 
-app.get("/readings", (req, res) => {
-  const { deviceId } = req.query;
+app.post("/tasks", async (req, res) => {
+  try {
+    const { title, description = "" } = req.body;
 
-  if (deviceId) {
-    return res.json(
-      readings.filter((reading) => reading.deviceId === deviceId)
-    );
-  }
-
-  res.json(readings);
-});
-
-app.get("/readings/summary", (req, res) => {
-  if (readings.length === 0) {
-    return res.json({
-      count: 0,
-      message: "No sensor readings available"
-    });
-  }
-
-  const temperatures = readings.map((reading) => reading.temperature);
-  const humidities = readings.map((reading) => reading.humidity);
-
-  const average = (values) =>
-    values.reduce((sum, value) => sum + value, 0) / values.length;
-
-  res.json({
-    count: readings.length,
-    temperature: {
-      average: Number(average(temperatures).toFixed(2)),
-      minimum: Math.min(...temperatures),
-      maximum: Math.max(...temperatures)
-    },
-    humidity: {
-      average: Number(average(humidities).toFixed(2)),
-      minimum: Math.min(...humidities),
-      maximum: Math.max(...humidities)
+    if (!title || title.trim() === "") {
+      return res.status(400).json({
+        error: "Task title is required"
+      });
     }
-  });
+
+    const tasks = await readTasks();
+
+    const newTask = {
+      id: crypto.randomUUID(),
+      title: title.trim(),
+      description,
+      completed: false,
+      createdAt: new Date().toISOString()
+    };
+
+    tasks.push(newTask);
+    await saveTasks(tasks);
+
+    res.status(201).json(newTask);
+  } catch (error) {
+    res.status(500).json({ error: "Could not create task" });
+  }
 });
 
-app.listen(PORT, () => {
-  console.log(`IoT API running at http://localhost:${PORT}`);
+app.put("/tasks/:id", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    const taskIndex = tasks.findIndex((task) => task.id === req.params.id);
+
+    if (taskIndex === -1) {
+      return res.status(404).json({
+        error: "Task not found"
+      });
+    }
+
+    const currentTask = tasks[taskIndex];
+
+    tasks[taskIndex] = {
+      ...currentTask,
+      title: req.body.title ?? currentTask.title,
+      description: req.body.description ?? currentTask.description,
+      completed: req.body.completed ?? currentTask.completed,
+      updatedAt: new Date().toISOString()
+    };
+
+    await saveTasks(tasks);
+
+    res.json(tasks[taskIndex]);
+  } catch (error) {
+    res.status(500).json({ error: "Could not update task" });
+  }
+});
+
+app.delete("/tasks/:id", async (req, res) => {
+  try {
+    const tasks = await readTasks();
+    const filteredTasks = tasks.filter((task) => task.id !== req.params.id);
+
+    if (filteredTasks.length === tasks.length) {
+      return res.status(404).json({
+        error: "Task not found"
+      });
+    }
+
+    await saveTasks(filteredTasks);
+
+    res.json({
+      message: "Task deleted successfully"
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Could not delete task" });
+  }
+});
+
+ensureDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Task API running at http://localhost:${PORT}`);
+  });
 }); 
