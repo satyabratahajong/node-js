@@ -1,157 +1,114 @@
 const express = require("express");
-const fs = require("node:fs/promises");
+const fs = require("node:fs");
 const path = require("node:path");
-const crypto = require("node:crypto");
+const csv = require("csv-parser");
 
 const app = express();
-const PORT = 3006;
+const PORT = 3007;
+const csvFile = path.join(__dirname, "sales.csv");
 
-const dataDirectory = path.join(__dirname, "data");
-const dataFile = path.join(dataDirectory, "notes.json");
+function loadSales() {
+  return new Promise((resolve, reject) => {
+    const sales = [];
 
-app.use(express.json());
+    fs.createReadStream(csvFile)
+      .pipe(csv())
+      .on("data", (row) => {
+        sales.push({
+          date: row.date,
+          product: row.product,
+          category: row.category,
+          quantity: Number(row.quantity),
+          price: Number(row.price),
+          revenue: Number(row.quantity) * Number(row.price)
+        });
+      })
+      .on("end", () => resolve(sales))
+      .on("error", reject);
+  });
+}
 
-async function initializeDatabase() {
-  await fs.mkdir(dataDirectory, { recursive: true });
-
+app.get("/sales", async (req, res, next) => {
   try {
-    await fs.access(dataFile);
-  } catch {
-    await fs.writeFile(dataFile, "[]");
-  }
-}
-
-async function readNotes() {
-  const content = await fs.readFile(dataFile, "utf-8");
-  return JSON.parse(content);
-}
-
-async function saveNotes(notes) {
-  await fs.writeFile(
-    dataFile,
-    JSON.stringify(notes, null, 2)
-  );
-}
-
-app.get("/notes", async (req, res, next) => {
-  try {
-    const notes = await readNotes();
-    const { search, tag } = req.query;
-
-    let filteredNotes = notes;
-
-    if (search) {
-      const searchText = search.toLowerCase();
-
-      filteredNotes = filteredNotes.filter((note) => {
-        return (
-          note.title.toLowerCase().includes(searchText) ||
-          note.content.toLowerCase().includes(searchText)
-        );
-      });
-    }
-
-    if (tag) {
-      filteredNotes = filteredNotes.filter((note) => {
-        return note.tags.includes(tag.toLowerCase());
-      });
-    }
-
-    res.json(filteredNotes);
+    const sales = await loadSales();
+    res.json(sales);
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/notes", async (req, res, next) => {
+app.get("/sales/summary", async (req, res, next) => {
   try {
-    const {
-      title,
-      content,
-      tags = []
-    } = req.body;
+    const sales = await loadSales();
 
-    if (!title || !content) {
-      return res.status(400).json({
-        error: "title and content are required"
-      });
-    }
-
-    if (!Array.isArray(tags)) {
-      return res.status(400).json({
-        error: "tags must be an array"
-      });
-    }
-
-    const notes = await readNotes();
-
-    const note = {
-      id: crypto.randomUUID(),
-      title: title.trim(),
-      content: content.trim(),
-      tags: tags.map((tag) => String(tag).toLowerCase().trim()),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    notes.push(note);
-    await saveNotes(notes);
-
-    res.status(201).json(note);
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.put("/notes/:id", async (req, res, next) => {
-  try {
-    const notes = await readNotes();
-    const noteIndex = notes.findIndex(
-      (note) => note.id === req.params.id
+    const totalRevenue = sales.reduce(
+      (sum, sale) => sum + sale.revenue,
+      0
     );
 
-    if (noteIndex === -1) {
-      return res.status(404).json({
-        error: "Note not found"
-      });
-    }
-
-    const oldNote = notes[noteIndex];
-
-    notes[noteIndex] = {
-      ...oldNote,
-      title: req.body.title ?? oldNote.title,
-      content: req.body.content ?? oldNote.content,
-      tags: req.body.tags ?? oldNote.tags,
-      updatedAt: new Date().toISOString()
-    };
-
-    await saveNotes(notes);
-
-    res.json(notes[noteIndex]);
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.delete("/notes/:id", async (req, res, next) => {
-  try {
-    const notes = await readNotes();
-    const remainingNotes = notes.filter(
-      (note) => note.id !== req.params.id
+    const totalQuantity = sales.reduce(
+      (sum, sale) => sum + sale.quantity,
+      0
     );
 
-    if (remainingNotes.length === notes.length) {
-      return res.status(404).json({
-        error: "Note not found"
-      });
+    const byCategory = {};
+
+    for (const sale of sales) {
+      if (!byCategory[sale.category]) {
+        byCategory[sale.category] = {
+          quantity: 0,
+          revenue: 0
+        };
+      }
+
+      byCategory[sale.category].quantity += sale.quantity;
+      byCategory[sale.category].revenue += sale.revenue;
     }
 
-    await saveNotes(remainingNotes);
+    const byProduct = {};
+
+    for (const sale of sales) {
+      if (!byProduct[sale.product]) {
+        byProduct[sale.product] = {
+          quantity: 0,
+          revenue: 0
+        };
+      }
+
+      byProduct[sale.product].quantity += sale.quantity;
+      byProduct[sale.product].revenue += sale.revenue;
+    }
 
     res.json({
-      message: "Note deleted successfully"
+      totalOrders: sales.length,
+      totalQuantity,
+      totalRevenue,
+      byCategory,
+      byProduct
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/sales/top-products", async (req, res, next) => {
+  try {
+    const sales = await loadSales();
+    const productRevenue = {};
+
+    for (const sale of sales) {
+      productRevenue[sale.product] =
+        (productRevenue[sale.product] || 0) + sale.revenue;
+    }
+
+    const products = Object.entries(productRevenue)
+      .map(([product, revenue]) => ({
+        product,
+        revenue
+      }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    res.json(products);
   } catch (error) {
     next(error);
   }
@@ -161,12 +118,10 @@ app.use((error, req, res, next) => {
   console.error(error);
 
   res.status(500).json({
-    error: "Internal server error"
+    error: "Could not process sales data"
   });
 });
 
-initializeDatabase().then(() => {
-  app.listen(PORT, () => {
-    console.log(`Notes API running at http://localhost:${PORT}`);
-  });
+app.listen(PORT, () => {
+  console.log(`Analytics API running at http://localhost:${PORT}`);
 });
