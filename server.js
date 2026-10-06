@@ -1,131 +1,105 @@
-const os = require("node:os");
-const fs = require("node:fs/promises");
-const path = require("node:path");
-const { spawn } = require("node:child_process");
+const express = require("express");
+const crypto = require("node:crypto");
+const { fileURLToPath } = require("node:url");
 
-function bytesToGB(bytes) {
-  return (bytes / 1024 / 1024 / 1024).toFixed(2);
-}
+const app = express();
+const PORT = 3005;
 
-function getSystemInfo() {
-  const cpus = os.cpus();
+app.use(express.json());
 
-  return {
-    hostname: os.hostname(),
-    platform: os.platform(),
-    operatingSystem: os.type(),
-    architecture: os.arch(),
-    release: os.release(),
-    username: os.userInfo().username,
-    cpuModel: cpus[0]?.model || "Unknown",
-    cpuCores: cpus.length,
-    totalMemoryGB: bytesToGB(os.totalmem()),
-    freeMemoryGB: bytesToGB(os.freemem()),
-    uptimeHours: (os.uptime() / 3600).toFixed(2),
-    homeDirectory: os.homedir(),
-    currentDirectory: process.cwd(),
-    generatedAt: new Date().toISOString()
+const jobs = new Map();
+const queue = [];
+
+function createJob(type, payload) {
+  const job = {
+    id: crypto.randomUUID(),
+    type,
+    payload,
+    status: "queued",
+    result: null,
+    error: null,
+    createdAt: new Date().toISOString(),
+    completedAt: null
   };
+
+  jobs.set(job.id, job);
+  queue.push(job);
+
+  processQueue();
+
+  return job;
 }
 
-function displayInfo(info) {
-  console.table(info);
-}
+async function processQueue() {
+  const job = queue.shift();
 
-async function saveReport(info) {
-  const reportsDirectory = path.join(process.cwd(), "reports");
+  if (!job || job.status !== "queued") {
+    return;
+  }
 
-  await fs.mkdir(reportsDirectory, {
-    recursive: true
-  });
+  job.status = "processing";
 
-  const filename = `system-report-${Date.now()}.json`;
-  const filePath = path.join(reportsDirectory, filename);
-
-  await fs.writeFile(
-    filePath,
-    JSON.stringify(info, null, 2)
-  );
-
-  console.log(`Report saved to: ${filePath}`);
-}
-
-function runCommand(command, args) {
-  return new Promise((resolve, reject) => {
-    const processInstance = spawn(command, args, {
-      shell: process.platform === "win32"
-    });
-
-    let output = "";
-    let errorOutput = "";
-
-    processInstance.stdout.on("data", (data) => {
-      output += data.toString();
-    });
-
-    processInstance.stderr.on("data", (data) => {
-      errorOutput += data.toString();
-    });
-
-    processInstance.on("error", reject);
-
-    processInstance.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(errorOutput || `Command exited with code ${code}`));
-        return;
-      }
-
-      resolve(output);
-    });
-  });
-}
-
-async function showNetworkInformation() {
   try {
-    const command = process.platform === "win32"
-      ? "ipconfig"
-      : "ifconfig";
+    await new Promise((resolve) => {
+      setTimeout(resolve, 2000);
+    });
 
-    const output = await runCommand(command, []);
+    if (job.type === "uppercase") {
+      job.result = String(job.payload.text).toUpperCase();
+    } else if (job.type === "reverse") {
+      job.result = String(job.payload.text).split("").reverse().join("");
+    } else {
+      throw new Error("Unknown job type");
+    }
 
-    console.log(output);
+    job.status = "completed";
+    job.completedAt = new Date().toISOString();
   } catch (error) {
-    console.error("Could not retrieve network information.");
-    console.error(error.message);
+    job.status = "failed";
+    job.error = error.message;
+  }
+
+  if (queue.length > 0) {
+    processQueue();
   }
 }
 
-async function main() {
-  const command = process.argv[2];
+app.post("/jobs", (req, res) => {
+  const { type, text } = req.body;
 
-  if (command === "info") {
-    const info = getSystemInfo();
-    displayInfo(info);
-    return;
+  if (!["uppercase", "reverse"].includes(type)) {
+    return res.status(400).json({
+      error: "type must be uppercase or reverse"
+    });
   }
 
-  if (command === "save") {
-    const info = getSystemInfo();
-    await saveReport(info);
-    return;
+  if (!text || typeof text !== "string") {
+    return res.status(400).json({
+      error: "text is required"
+    });
   }
 
-  if (command === "network") {
-    await showNetworkInformation();
-    return;
-  }
+  const job = createJob(type, { text });
 
-  console.log(`
-System Information CLI
-
-Usage:
-  node system-info.js info
-  node system-info.js save
-  node system-info.js network
-`);
-}
-
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
+  res.status(202).json(job);
 });
+
+app.get("/jobs", (req, res) => {
+  res.json([...jobs.values()]);
+});
+
+app.get("/jobs/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+
+  if (!job) {
+    return res.status(404).json({
+      error: "Job not found"
+    });
+  }
+
+  res.json(job);
+});
+
+app.listen(PORT, () => {
+  console.log(`Job queue running at http://localhost:${PORT}`);
+}); 
