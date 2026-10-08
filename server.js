@@ -1,250 +1,131 @@
-const express = require("express");
-const crypto = require("node:crypto");
+const os = require("node:os");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
 
-const app = express();
-const PORT = process.env.PORT || 3005;
-
-app.use(express.json());
-
-const jobs = new Map();
-const queue = [];
-
-let isProcessing = false;
-
-function sleep(milliseconds) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
+function bytesToGB(bytes) {
+  return (bytes / 1024 / 1024 / 1024).toFixed(2);
 }
 
-function createJob(type, payload) {
-  const job = {
-    id: crypto.randomUUID(),
-    type,
-    payload,
-    status: "queued",
-    result: null,
-    error: null,
-    createdAt: new Date().toISOString(),
-    startedAt: null,
-    completedAt: null
+function getSystemInfo() {
+  const cpus = os.cpus();
+
+  return {
+    hostname: os.hostname(),
+    platform: os.platform(),
+    operatingSystem: os.type(),
+    architecture: os.arch(),
+    release: os.release(),
+    username: os.userInfo().username,
+    cpuModel: cpus[0]?.model || "Unknown",
+    cpuCores: cpus.length,
+    totalMemoryGB: bytesToGB(os.totalmem()),
+    freeMemoryGB: bytesToGB(os.freemem()),
+    uptimeHours: (os.uptime() / 3600).toFixed(2),
+    homeDirectory: os.homedir(),
+    currentDirectory: process.cwd(),
+    generatedAt: new Date().toISOString()
   };
-
-  jobs.set(job.id, job);
-  queue.push(job);
-
-  processNextJob();
-
-  return job;
 }
 
-async function processNextJob() {
-  if (isProcessing || queue.length === 0) {
-    return;
-  }
-
-  isProcessing = true;
-
-  const job = queue.shift();
-
-  job.status = "processing";
-  job.startedAt = new Date().toISOString();
-
-  try {
-    await processJob(job);
-
-    job.status = "completed";
-    job.completedAt = new Date().toISOString();
-  } catch (error) {
-    job.status = "failed";
-    job.error = error.message;
-    job.completedAt = new Date().toISOString();
-  } finally {
-    isProcessing = false;
-
-    setImmediate(() => {
-      processNextJob();
-    });
-  }
+function displayInfo(info) {
+  console.table(info);
 }
 
-async function processJob(job) {
-  await sleep(2000);
+async function saveReport(info) {
+  const reportsDirectory = path.join(process.cwd(), "reports");
 
-  const text = job.payload.text;
-
-  if (typeof text !== "string") {
-    throw new Error("Job text must be a string");
-  }
-
-  if (job.type === "uppercase") {
-    job.result = text.toUpperCase();
-    return;
-  }
-
-  if (job.type === "reverse") {
-    job.result = text.split("").reverse().join("");
-    return;
-  }
-
-  if (job.type === "wordCount") {
-    const words = text.trim() === ""
-      ? []
-      : text.trim().split(/\s+/);
-
-    job.result = {
-      text,
-      wordCount: words.length,
-      characterCount: text.length
-    };
-
-    return;
-  }
-
-  throw new Error(`Unsupported job type: ${job.type}`);
-}
-
-app.get("/", (req, res) => {
-  res.json({
-    name: "Background Job Queue API",
-    endpoints: {
-      createJob: "POST /jobs",
-      listJobs: "GET /jobs",
-      getJob: "GET /jobs/:id",
-      deleteJob: "DELETE /jobs/:id",
-      queueStatus: "GET /queue/status"
-    }
-  });
-});
-
-app.post("/jobs", (req, res) => {
-  const { type, text } = req.body;
-
-  const supportedTypes = [
-    "uppercase",
-    "reverse",
-    "wordCount"
-  ];
-
-  if (!supportedTypes.includes(type)) {
-    return res.status(400).json({
-      error: "Invalid job type",
-      supportedTypes
-    });
-  }
-
-  if (typeof text !== "string" || text.trim() === "") {
-    return res.status(400).json({
-      error: "text must be a non-empty string"
-    });
-  }
-
-  if (text.length > 5000) {
-    return res.status(400).json({
-      error: "text cannot exceed 5000 characters"
-    });
-  }
-
-  const job = createJob(type, { text });
-
-  res.status(202).json({
-    message: "Job accepted",
-    job
-  });
-});
-
-app.get("/jobs", (req, res) => {
-  const { status, type } = req.query;
-
-  let results = [...jobs.values()];
-
-  if (status) {
-    results = results.filter((job) => job.status === status);
-  }
-
-  if (type) {
-    results = results.filter((job) => job.type === type);
-  }
-
-  results.sort((a, b) => {
-    return new Date(b.createdAt) - new Date(a.createdAt);
+  await fs.mkdir(reportsDirectory, {
+    recursive: true
   });
 
-  res.json({
-    count: results.length,
-    jobs: results
-  });
-});
+  const filename = `system-report-${Date.now()}.json`;
+  const filePath = path.join(reportsDirectory, filename);
 
-app.get("/jobs/:id", (req, res) => {
-  const job = jobs.get(req.params.id);
-
-  if (!job) {
-    return res.status(404).json({
-      error: "Job not found"
-    });
-  }
-
-  res.json(job);
-});
-
-app.delete("/jobs/:id", (req, res) => {
-  const job = jobs.get(req.params.id);
-
-  if (!job) {
-    return res.status(404).json({
-      error: "Job not found"
-    });
-  }
-
-  if (job.status === "processing") {
-    return res.status(409).json({
-      error: "A processing job cannot be deleted"
-    });
-  }
-
-  jobs.delete(req.params.id);
-
-  const queueIndex = queue.findIndex(
-    (queuedJob) => queuedJob.id === req.params.id
+  await fs.writeFile(
+    filePath,
+    JSON.stringify(info, null, 2)
   );
 
-  if (queueIndex !== -1) {
-    queue.splice(queueIndex, 1);
+  console.log(`Report saved to: ${filePath}`);
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const processInstance = spawn(command, args, {
+      shell: process.platform === "win32"
+    });
+
+    let output = "";
+    let errorOutput = "";
+
+    processInstance.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+
+    processInstance.stderr.on("data", (data) => {
+      errorOutput += data.toString();
+    });
+
+    processInstance.on("error", reject);
+
+    processInstance.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(errorOutput || `Command exited with code ${code}`));
+        return;
+      }
+
+      resolve(output);
+    });
+  });
+}
+
+async function showNetworkInformation() {
+  try {
+    const command = process.platform === "win32"
+      ? "ipconfig"
+      : "ifconfig";
+
+    const output = await runCommand(command, []);
+
+    console.log(output);
+  } catch (error) {
+    console.error("Could not retrieve network information.");
+    console.error(error.message);
+  }
+}
+
+async function main() {
+  const command = process.argv[2];
+
+  if (command === "info") {
+    const info = getSystemInfo();
+    displayInfo(info);
+    return;
   }
 
-  res.json({
-    message: "Job deleted successfully"
-  });
-});
+  if (command === "save") {
+    const info = getSystemInfo();
+    await saveReport(info);
+    return;
+  }
 
-app.get("/queue/status", (req, res) => {
-  const allJobs = [...jobs.values()];
+  if (command === "network") {
+    await showNetworkInformation();
+    return;
+  }
 
-  res.json({
-    queued: allJobs.filter((job) => job.status === "queued").length,
-    processing: allJobs.filter(
-      (job) => job.status === "processing"
-    ).length,
-    completed: allJobs.filter(
-      (job) => job.status === "completed"
-    ).length,
-    failed: allJobs.filter(
-      (job) => job.status === "failed"
-    ).length,
-    queueLength: queue.length,
-    isProcessing
-  });
-});
+  console.log(`
+System Information CLI
 
-app.use((error, req, res, next) => {
-  console.error(error);
+Usage:
+  node system-info.js info
+  node system-info.js save
+  node system-info.js network
+`);
+}
 
-  res.status(500).json({
-    error: "Internal server error"
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`Job Queue API running at http://localhost:${PORT}`);
+main().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
 });
