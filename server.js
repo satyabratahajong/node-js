@@ -1,34 +1,38 @@
-// sysinfo.js
-const os = require('os');
-const { execSync } = require('child_process');
+// urlShortener.js
+const express = require('express');
+const crypto = require('crypto');
 
-function getSystemDiagnostics() {
-  const cpus = os.cpus();
-  const totalMem = (os.totalmem() / 1024 ** 3).toFixed(2);
-  const freeMem = (os.freemem() / 1024 ** 3).toFixed(2);
-  const uptimeHours = (os.uptime() / 3600).toFixed(2);
+const app = express();
+app.use(express.json());
 
-  let nodeVersion = process.version;
-  let npmVersion = 'N/A';
+const urlDatabase = new Map();
 
-  try {
-    npmVersion = execSync('npm -v').toString().trim();
-  } catch (err) {
-    // npm not installed or not in PATH
-  }
+// POST /shorten - Generate short URL
+app.post('/shorten', (req, res) => {
+  const { originalUrl } = req.body;
+  if (!originalUrl) return res.status(400).json({ error: 'URL is required' });
 
-  console.log('='.repeat(40));
-  console.log('       DEVELOPER SYSTEM DIAGNOSTICS      ');
-  console.log('='.repeat(40));
-  console.log(`Platform     : ${os.platform()} (${os.arch()})`);
-  console.log(`OS Release   : ${os.release()}`);
-  console.log(`CPU Model    : ${cpus[0].model}`);
-  console.log(`CPU Cores    : ${cpus.length}`);
-  console.log(`Memory Usage : ${totalMem - freeMem} GB / ${totalMem} GB`);
-  console.log(`System Uptime: ${uptimeHours} hours`);
-  console.log(`Node.js      : ${nodeVersion}`);
-  console.log(`npm          : v${npmVersion}`);
-  console.log('='.repeat(40));
-}
+  const id = crypto.randomBytes(3).toString('hex');
+  urlDatabase.set(id, { originalUrl, clicks: 0, createdAt: new Date() });
 
-getSystemDiagnostics();
+  res.json({ shortUrl: `http://localhost:3000/${id}`, id });
+});
+
+// GET /:id - Redirect to destination
+app.get('/:id', (req, res) => {
+  const record = urlDatabase.get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Short URL not found' });
+
+  record.clicks += 1;
+  res.redirect(record.originalUrl);
+});
+
+// GET /api/analytics/:id - View stats
+app.get('/api/analytics/:id', (req, res) => {
+  const record = urlDatabase.get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Short URL not found' });
+
+  res.json(record);
+});
+
+app.listen(3000, () => console.log('Shortener API listening on port 3000'));
