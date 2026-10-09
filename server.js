@@ -1,38 +1,38 @@
-// urlShortener.js
-const express = require('express');
-const crypto = require('crypto');
+// server.js
+const http = require('http');
+const { WebSocketServer, WebSocket } = require('ws');
 
-const app = express();
-app.use(express.json());
-
-const urlDatabase = new Map();
-
-// POST /shorten - Generate short URL
-app.post('/shorten', (req, res) => {
-  const { originalUrl } = req.body;
-  if (!originalUrl) return res.status(400).json({ error: 'URL is required' });
-
-  const id = crypto.randomBytes(3).toString('hex');
-  urlDatabase.set(id, { originalUrl, clicks: 0, createdAt: new Date() });
-
-  res.json({ shortUrl: `http://localhost:3000/${id}`, id });
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('WebSocket Server Running');
 });
 
-// GET /:id - Redirect to destination
-app.get('/:id', (req, res) => {
-  const record = urlDatabase.get(req.params.id);
-  if (!record) return res.status(404).json({ error: 'Short URL not found' });
+const wss = new WebSocketServer({ server });
 
-  record.clicks += 1;
-  res.redirect(record.originalUrl);
+wss.on('connection', (ws) => {
+  console.log('New client connected');
+
+  ws.on('message', (message) => {
+    let parsedMessage;
+    try {
+      parsedMessage = JSON.parse(message.toString());
+    } catch {
+      parsedMessage = { text: message.toString() };
+    }
+
+    // Broadcast message to all connected clients except sender
+    wss.clients.forEach((client) => {
+      if (client !== ws && client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({
+          sender: 'peer',
+          data: parsedMessage,
+          timestamp: new Date().toISOString(),
+        }));
+      }
+    });
+  });
+
+  ws.on('close', () => console.log('Client disconnected'));
 });
 
-// GET /api/analytics/:id - View stats
-app.get('/api/analytics/:id', (req, res) => {
-  const record = urlDatabase.get(req.params.id);
-  if (!record) return res.status(404).json({ error: 'Short URL not found' });
-
-  res.json(record);
-});
-
-app.listen(3000, () => console.log('Shortener API listening on port 3000'));
+server.listen(8080, () => console.log('WS Server running on ws://localhost:8080'));
