@@ -1,38 +1,54 @@
-// server.js
-const http = require('http');
-const { WebSocketServer, WebSocket } = require('ws');
+// authServer.js
+const express = require('express');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('WebSocket Server Running');
+const app = express();
+app.use(express.json());
+
+const SECRET_KEY = 'super-secret-key-change-in-production';
+const users = new Map(); // Simulated user store
+
+// Register Route
+app.post('/register', async (req, res) => {
+  const { username, password } = req.body;
+  if (users.has(username)) return res.status(400).json({ error: 'User exists' });
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  users.set(username, { password: hashedPassword });
+  res.status(201).json({ message: 'User registered successfully' });
 });
 
-const wss = new WebSocketServer({ server });
+// Login Route
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  const user = users.get(username);
 
-wss.on('connection', (ws) => {
-  console.log('New client connected');
+  if (!user || !(await bcrypt.compare(password, user.password))) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
 
-  ws.on('message', (message) => {
-    let parsedMessage;
-    try {
-      parsedMessage = JSON.parse(message.toString());
-    } catch {
-      parsedMessage = { text: message.toString() };
-    }
+  const token = jwt.sign({ username }, SECRET_KEY, { expiresIn: '1h' });
+  res.json({ token });
+});
 
-    // Broadcast message to all connected clients except sender
-    wss.clients.forEach((client) => {
-      if (client !== ws && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          sender: 'peer',
-          data: parsedMessage,
-          timestamp: new Date().toISOString(),
-        }));
-      }
-    });
+// Auth Middleware
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, SECRET_KEY, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
   });
+}
 
-  ws.on('close', () => console.log('Client disconnected'));
+// Protected Route
+app.get('/dashboard', authenticateToken, (req, res) => {
+  res.json({ message: `Welcome to your dashboard, ${req.user.username}!` });
 });
 
-server.listen(8080, () => console.log('WS Server running on ws://localhost:8080'));
+app.listen(4000, () => console.log('Auth server on port 4000'));
