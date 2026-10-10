@@ -1,54 +1,38 @@
-// authServer.js
+// urlShortener.js
 const express = require('express');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
 
-const SECRET_KEY = 'super-secret-key-change-in-production';
-const users = new Map(); // Simulated user store
+const urlDatabase = new Map();
 
-// Register Route
-app.post('/register', async (req, res) => {
-  const { username, password } = req.body;
-  if (users.has(username)) return res.status(400).json({ error: 'User exists' });
+// POST /shorten - Generate short URL
+app.post('/shorten', (req, res) => {
+  const { originalUrl } = req.body;
+  if (!originalUrl) return res.status(400).json({ error: 'URL is required' });
 
-  const hashedPassword = await bcrypt.hash(password, 10);
-  users.set(username, { password: hashedPassword });
-  res.status(201).json({ message: 'User registered successfully' });
+  const id = crypto.randomBytes(3).toString('hex');
+  urlDatabase.set(id, { originalUrl, clicks: 0, createdAt: new Date() });
+
+  res.json({ shortUrl: `http://localhost:3000/${id}`, id });
 });
 
-// Login Route
-app.post('/login', async (req, res) => {
-  const { username, password } = req.body;
-  const user = users.get(username);
+// GET /:id - Redirect to destination
+app.get('/:id', (req, res) => {
+  const record = urlDatabase.get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Short URL not found' });
 
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const token = jwt.sign({ username }, SECRET_KEY, { expiresIn: '1h' });
-  res.json({ token });
+  record.clicks += 1;
+  res.redirect(record.originalUrl);
 });
 
-// Auth Middleware
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+// GET /api/analytics/:id - View stats
+app.get('/api/analytics/:id', (req, res) => {
+  const record = urlDatabase.get(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Short URL not found' });
 
-  if (!token) return res.sendStatus(401);
-
-  jwt.verify(token, SECRET_KEY, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
-    next();
-  });
-}
-
-// Protected Route
-app.get('/dashboard', authenticateToken, (req, res) => {
-  res.json({ message: `Welcome to your dashboard, ${req.user.username}!` });
+  res.json(record);
 });
 
-app.listen(4000, () => console.log('Auth server on port 4000'));
+app.listen(3000, () => console.log('Shortener API listening on port 3000'));
