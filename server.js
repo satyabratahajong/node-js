@@ -1,38 +1,29 @@
-// urlShortener.js
 const express = require('express');
-const crypto = require('crypto');
+const http = require('http');
+const { Server } = require('socket.io');
 
 const app = express();
-app.use(express.json());
+const server = http.createServer(app);
+const io = new Server(server);
 
-const urlDatabase = new Map();
+// Serve static frontend files from a "public" folder
+app.use(express.static('public'));
 
-// POST /shorten - Generate short URL
-app.post('/shorten', (req, res) => {
-  const { originalUrl } = req.body;
-  if (!originalUrl) return res.status(400).json({ error: 'URL is required' });
+io.on('connection', (socket) => {
+  console.log(`User connected: ${socket.id}`);
 
-  const id = crypto.randomBytes(3).toString('hex');
-  urlDatabase.set(id, { originalUrl, clicks: 0, createdAt: new Date() });
+  // Listen for incoming chat messages from a client
+  socket.on('chat message', (msg) => {
+    // Broadcast the message to all connected clients including the sender
+    io.emit('chat message', msg);
+  });
 
-  res.json({ shortUrl: `http://localhost:3000/${id}`, id });
+  socket.on('disconnect', () => {
+    console.log(`User disconnected: ${socket.id}`);
+  });
 });
 
-// GET /:id - Redirect to destination
-app.get('/:id', (req, res) => {
-  const record = urlDatabase.get(req.params.id);
-  if (!record) return res.status(404).json({ error: 'Short URL not found' });
-
-  record.clicks += 1;
-  res.redirect(record.originalUrl);
+const PORT = process.0 || 3000;
+server.listen(PORT, () => {
+  console.log(`Chat server running on http://localhost:${PORT}`);
 });
-
-// GET /api/analytics/:id - View stats
-app.get('/api/analytics/:id', (req, res) => {
-  const record = urlDatabase.get(req.params.id);
-  if (!record) return res.status(404).json({ error: 'Short URL not found' });
-
-  res.json(record);
-});
-
-app.listen(3000, () => console.log('Shortener API listening on port 3000'));
