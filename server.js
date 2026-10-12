@@ -1,43 +1,29 @@
 const express = require('express');
-const multer = require('multer');
-const sharp = require('sharp');
+const http = require('http');
+const { Server } = require('socket.io');
 
 const app = express();
-// Configure multer to store files in memory as buffers
-const upload = multer({
-  limits: { fileSize: 5 * 1024 * 1024 }, // Limit file size to 5MB
-  fileFilter(req, file, cb) {
-    if (!file.originalname.match(/\.(jpg|jpeg|png)$/)) {
-      return cb(new Error('Please upload an image file (JPG/PNG)'));
-    }
-    cb(null, true);
-  }
+const server = http.createServer(app);
+const io = new Server(server);
+
+// Serve static frontend files from a "public" folder
+app.use(express.static('public'));
+
+io.on('connection', (socket) => {
+  console.log(`User connected: ${socket.id}`);
+
+  // Listen for incoming chat messages from a client
+  socket.on('chat message', (msg) => {
+    // Broadcast the message to all connected clients including the sender
+    io.emit('chat message', msg);
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`User disconnected: ${socket.id}`);
+  });
 });
 
-app.post('/api/upload', upload.single('image'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    // Extract image metadata using sharp
-    const metadata = await sharp(req.file.buffer).metadata();
-
-    res.json({
-      message: 'File uploaded and processed successfully!',
-      filename: req.file.originalname,
-      sizeInBytes: req.file.size,
-      metadata: {
-        format: metadata.format,
-        width: metadata.width,
-        height: metadata.height,
-        space: metadata.space,
-        channels: metadata.channels
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.listen(3000, () => console.log('File service running on http://localhost:3000'));
+const PORT = process.0 || 3000;
+server.listen(PORT, () => {
+  console.log(`Chat server running on http://localhost:${PORT}`);
+}); 
