@@ -1,41 +1,32 @@
 const express = require('express');
+const axios = require('axios');
+const cheerio = require('cheerio');
 const app = express();
 
-const requestTracker = new Map();
-const RATE_LIMIT = 5; // Max 5 requests
-const WINDOW_MS = 60 * 1000; // Per 1 minute window
-
-const rateLimiter = (req, res, next) => {
-  const ip = req.ip || req.connection.remoteAddress;
-  const now = Date.now();
-
-  if (!requestTracker.has(ip)) {
-    requestTracker.set(ip, { count: 1, resetTime: now + WINDOW_MS });
-    return next();
+app.get('/api/scrape', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) {
+    return res.status(400).json({ error: 'Please provide a target URL via ?url=https://example.com' });
   }
 
-  const record = requestTracker.get(ip);
-  if (now > record.resetTime) {
-    record.count = 1;
-    record.resetTime = now + WINDOW_MS;
-    return next();
-  }
+  try {
+    const response = await axios.get(targetUrl);
+    const $ = cheerio.load(response.data);
 
-  if (record.count >= RATE_LIMIT) {
-    return res.status(429).json({
-      error: 'Rate limit exceeded. Please try again later.',
-      retryAfterSeconds: Math.ceil((record.resetTime - now) / 1000)
+    const headings = [];
+    $('h1, h2, h3').each((i, el) => {
+      headings.push($(el).text().trim());
     });
+
+    res.json({
+      scrapedUrl: targetUrl,
+      pageTitle: $('title').text(),
+      headingsCount: headings.length,
+      headings
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to scrape target URL', details: err.message });
   }
-
-  record.count++;
-  next();
-};
-
-app.use('/api/', rateLimiter);
-
-app.get('/api/resource', (req, res) => {
-  res.json({ message: 'Access granted! You are within your rate limit.' });
 });
 
-app.listen(3000, () => console.log('Rate-limited API running on http://localhost:3000'));
+app.listen(3000, () => console.log('Scraper API running on http://localhost:3000'));
