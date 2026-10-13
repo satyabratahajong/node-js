@@ -1,31 +1,41 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 const app = express();
 
-const POSTS_DIR = path.join(__dirname, 'posts');
+const requestTracker = new Map();
+const RATE_LIMIT = 5; // Max 5 requests
+const WINDOW_MS = 60 * 1000; // Per 1 minute window
 
-// Ensure the posts directory exists
-if (!fs.existsSync(POSTS_DIR)) {
-  fs.mkdirSync(POSTS_DIR);
-}
+const rateLimiter = (req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
 
-// Get list of all post slugs
-app.get('/api/posts', (req, res) => {
-  fs.readdir(POSTS_DIR, (err, files) => {
-    if (err) return res.status(500).json({ error: 'Unable to read posts directory' });
-    const posts = files.filter(file => file.endsWith('.md')).map(file => file.replace('.md', ''));
-    res.json({ posts });
-  });
+  if (!requestTracker.has(ip)) {
+    requestTracker.set(ip, { count: 1, resetTime: now + WINDOW_MS });
+    return next();
+  }
+
+  const record = requestTracker.get(ip);
+  if (now > record.resetTime) {
+    record.count = 1;
+    record.resetTime = now + WINDOW_MS;
+    return next();
+  }
+
+  if (record.count >= RATE_LIMIT) {
+    return res.status(429).json({
+      error: 'Rate limit exceeded. Please try again later.',
+      retryAfterSeconds: Math.ceil((record.resetTime - now) / 1000)
+    });
+  }
+
+  record.count++;
+  next();
+};
+
+app.use('/api/', rateLimiter);
+
+app.get('/api/resource', (req, res) => {
+  res.json({ message: 'Access granted! You are within your rate limit.' });
 });
 
-// Get content of a specific post by slug
-app.get('/api/posts/:slug', (req, res) => {
-  const filePath = path.join(POSTS_DIR, `${req.params.slug}.md`);
-  fs.readFile(filePath, 'utf8', (err, data) => {
-    if (err) return res.status(404).json({ error: 'Blog post not found' });
-    res.json({ slug: req.params.slug, content: data });
-  });
-});
-
-app.listen(3000, () => console.log('Markdown Blog API running on http://localhost:3000'));
+app.listen(3000, () => console.log('Rate-limited API running on http://localhost:3000'));
