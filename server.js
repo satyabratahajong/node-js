@@ -1,36 +1,31 @@
 const express = require('express');
-const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const app = express();
-app.use(express.json());
 
-// In-memory store: shortId -> { originalUrl, clicks }
-const urlDatabase = new Map();
+const POSTS_DIR = path.join(__dirname, 'posts');
 
-app.post('/api/shorten', (req, res) => {
-  const { originalUrl } = req.body;
-  if (!originalUrl) return res.status(400).json({ error: 'originalUrl is required' });
+// Ensure the posts directory exists
+if (!fs.existsSync(POSTS_DIR)) {
+  fs.mkdirSync(POSTS_DIR);
+}
 
-  const shortId = crypto.randomBytes(4).toString('hex');
-  urlDatabase.set(shortId, { originalUrl, clicks: 0 });
-
-  res.status(201).json({
-    shortId,
-    shortUrl: `http://localhost:3000/${shortId}`
+// Get list of all post slugs
+app.get('/api/posts', (req, res) => {
+  fs.readdir(POSTS_DIR, (err, files) => {
+    if (err) return res.status(500).json({ error: 'Unable to read posts directory' });
+    const posts = files.filter(file => file.endsWith('.md')).map(file => file.replace('.md', ''));
+    res.json({ posts });
   });
 });
 
-app.get('/:shortId', (req, res) => {
-  const record = urlDatabase.get(req.params.shortId);
-  if (!record) return res.status(404).send('URL not found');
-
-  record.clicks++;
-  res.redirect(record.originalUrl);
+// Get content of a specific post by slug
+app.get('/api/posts/:slug', (req, res) => {
+  const filePath = path.join(POSTS_DIR, `${req.params.slug}.md`);
+  fs.readFile(filePath, 'utf8', (err, data) => {
+    if (err) return res.status(404).json({ error: 'Blog post not found' });
+    res.json({ slug: req.params.slug, content: data });
+  });
 });
 
-app.get('/api/stats/:shortId', (req, res) => {
-  const record = urlDatabase.get(req.params.shortId);
-  if (!record) return res.status(404).json({ error: 'URL not found' });
-  res.json({ originalUrl: record.originalUrl, clicks: record.clicks });
-});
-
-app.listen(3000, () => console.log('URL Shortener running on http://localhost:3000'));
+app.listen(3000, () => console.log('Markdown Blog API running on http://localhost:3000'));
