@@ -1,32 +1,40 @@
 const express = require('express');
-const axios = require('axios');
+const crypto = require('crypto');
 const app = express();
 
-const cache = new Map();
-const TTL_MS = 30 * 1000; // 30-second cache duration
+// Capture raw request body as buffer to ensure accurate signature verification
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 
-app.get('/api/proxy', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) {
-    return res.status(400).json({ error: 'Please provide a target URL via ?url=https://...' });
+const WEBHOOK_SECRET = 'your_super_secret_webhook_key';
+
+app.post('/api/webhook', (req, res) => {
+  const signature = req.headers['x-signature'];
+  if (!signature) {
+    return res.status(401).json({ error: 'Missing x-signature header' });
   }
 
-  const now = Date.now();
-  if (cache.has(targetUrl)) {
-    const cachedItem = cache.get(targetUrl);
-    if (now < cachedItem.expiry) {
-      return res.json({ source: 'cache', data: cachedItem.data });
-    }
-    cache.delete(targetUrl); // Expired
+  // Compute expected HMAC signature
+  const computedSignature = crypto
+    .createHmac('sha256', WEBHOOK_SECRET)
+    .update(req.rawBody)
+    .digest('hex');
+
+  // Use timing-safe comparison to prevent timing attacks
+  const isValid = crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(computedSignature)
+  );
+
+  if (!isValid) {
+    return res.status(403).json({ error: 'Invalid webhook signature' });
   }
 
-  try {
-    const response = await axios.get(targetUrl);
-    cache.set(targetUrl, { data: response.data, expiry: now + TTL_MS });
-    res.json({ source: 'origin', data: response.data });
-  } catch (err) {
-    res.status(500).json({ error: 'Proxy request failed', details: err.message });
-  }
+  console.log('Verified Webhook Event Received:', req.body);
+  res.json({ status: 'success', message: 'Webhook verified and processed' });
 });
 
-app.listen(3000, () => console.log('Caching Proxy running on http://localhost:3000'));
+app.listen(3000, () => console.log('Webhook security receiver running on http://localhost:3000'));
