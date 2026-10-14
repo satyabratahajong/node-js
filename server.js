@@ -1,46 +1,32 @@
-const fs = require('fs');
-const path = require('path');
+const express = require('express');
+const axios = require('axios');
+const app = express();
 
-// Target directory passed via command line argument or defaults to './downloads'
-const targetDir = process.argv[2] || path.join(__dirname, 'downloads');
+const cache = new Map();
+const TTL_MS = 30 * 1000; // 30-second cache duration
 
-const extensionMap = {
-  images: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'],
-  documents: ['.pdf', '.docx', '.txt', '.xlsx', '.csv', '.pptx'],
-  archives: ['.zip', '.tar', '.gz', '.rar', '.7z'],
-  code: ['.js', '.py', '.html', '.css', '.json', '.ts']
-};
-
-function organizeFiles() {
-  if (!fs.existsSync(targetDir)) {
-    console.log(`Directory does not exist: ${targetDir}`);
-    return;
+app.get('/api/proxy', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) {
+    return res.status(400).json({ error: 'Please provide a target URL via ?url=https://...' });
   }
 
-  const items = fs.readdirSync(targetDir);
-  items.forEach(item => {
-    const filePath = path.join(targetDir, item);
-    if (fs.statSync(filePath).isDirectory()) return;
-
-    const ext = path.extname(item).toLowerCase();
-    let category = 'others';
-
-    for (const [cat, exts] of Object.entries(extensionMap)) {
-      if (exts.includes(ext)) {
-        category = cat;
-        break;
-      }
+  const now = Date.now();
+  if (cache.has(targetUrl)) {
+    const cachedItem = cache.get(targetUrl);
+    if (now < cachedItem.expiry) {
+      return res.json({ source: 'cache', data: cachedItem.data });
     }
+    cache.delete(targetUrl); // Expired
+  }
 
-    const categoryDir = path.join(targetDir, category);
-    if (!fs.existsSync(categoryDir)) {
-      fs.mkdirSync(categoryDir);
-    }
+  try {
+    const response = await axios.get(targetUrl);
+    cache.set(targetUrl, { data: response.data, expiry: now + TTL_MS });
+    res.json({ source: 'origin', data: response.data });
+  } catch (err) {
+    res.status(500).json({ error: 'Proxy request failed', details: err.message });
+  }
+});
 
-    fs.renameSync(filePath, path.join(categoryDir, item));
-    console.log(`Sorted: ${item} -> ${category}/`);
-  });
-  console.log('File organization complete!');
-}
-
-organizeFiles();
+app.listen(3000, () => console.log('Caching Proxy running on http://localhost:3000'));
