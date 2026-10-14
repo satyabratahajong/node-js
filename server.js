@@ -1,32 +1,46 @@
-const express = require('express');
-const app = express();
-app.use(express.json());
+const fs = require('fs');
+const path = require('path');
 
-let clients = [];
+// Target directory passed via command line argument or defaults to './downloads'
+const targetDir = process.argv[2] || path.join(__dirname, 'downloads');
 
-// SSE endpoint clients connect to
-app.get('/api/events', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
+const extensionMap = {
+  images: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'],
+  documents: ['.pdf', '.docx', '.txt', '.xlsx', '.csv', '.pptx'],
+  archives: ['.zip', '.tar', '.gz', '.rar', '.7z'],
+  code: ['.js', '.py', '.html', '.css', '.json', '.ts']
+};
 
-  const clientId = Date.now();
-  const newClient = { id: clientId, res };
-  clients.push(newClient);
+function organizeFiles() {
+  if (!fs.existsSync(targetDir)) {
+    console.log(`Directory does not exist: ${targetDir}`);
+    return;
+  }
 
-  req.on('close', () => {
-    clients = clients.filter(c => c.id !== clientId);
+  const items = fs.readdirSync(targetDir);
+  items.forEach(item => {
+    const filePath = path.join(targetDir, item);
+    if (fs.statSync(filePath).isDirectory()) return;
+
+    const ext = path.extname(item).toLowerCase();
+    let category = 'others';
+
+    for (const [cat, exts] of Object.entries(extensionMap)) {
+      if (exts.includes(ext)) {
+        category = cat;
+        break;
+      }
+    }
+
+    const categoryDir = path.join(targetDir, category);
+    if (!fs.existsSync(categoryDir)) {
+      fs.mkdirSync(categoryDir);
+    }
+
+    fs.renameSync(filePath, path.join(categoryDir, item));
+    console.log(`Sorted: ${item} -> ${category}/`);
   });
-});
+  console.log('File organization complete!');
+}
 
-// Broadcast endpoint to trigger notifications to all connected clients
-app.post('/api/notify', (req, res) => {
-  const { message } = req.body;
-  clients.forEach(client => {
-    client.res.write(`data: ${JSON.stringify({ message, timestamp: new Date() })}\n\n`);
-  });
-  res.json({ status: 'Broadcasted to active streams', activeClients: clients.length });
-});
-
-app.listen(3000, () => console.log('SSE Server running on http://localhost:3000'));
+organizeFiles();
