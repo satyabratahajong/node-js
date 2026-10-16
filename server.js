@@ -1,39 +1,46 @@
-const EventEmitter = require('events');
+const express = require('express');
+const app = express();
+app.use(express.json());
 
-class JobQueue extends EventEmitter {
-  constructor(concurrency = 2) {
-    super();
-    this.concurrency = concurrency;
-    this.running = 0;
-    this.queue = [];
-  }
+const monitoredServices = [
+  { name: 'Auth Service', url: 'https://httpbin.org/status/200' },
+  { name: 'Payment API', url: 'https://httpbin.org/status/500' }
+];
 
-  add(jobData) {
-    this.queue.push(jobData);
-    this.process();
-  }
+const serviceStatuses = new Map();
 
-  process() {
-    if (this.running >= this.concurrency || this.queue.length === 0) {
-      return;
+// Check services status every 30 seconds
+async function checkUptime() {
+  for (const service of monitoredServices) {
+    const startTime = Date.now();
+    try {
+      const response = await fetch(service.url);
+      const latency = Date.now() - startTime;
+      serviceStatuses.set(service.name, {
+        status: response.ok ? 'UP' : 'DOWN',
+        statusCode: response.status,
+        latencyMs: latency,
+        lastChecked: new Date().toISOString()
+      });
+    } catch (err) {
+      serviceStatuses.set(service.name, {
+        status: 'DOWN',
+        error: err.message,
+        lastChecked: new Date().toISOString()
+      });
     }
-
-    const job = this.queue.shift();
-    this.running++;
-
-    // Simulate async background task (e.g., sending email, video encoding)
-    setTimeout(() => {
-      console.log(`[Job Completed] Processed task ID: ${job.id}`);
-      this.running--;
-      this.process(); // Pick next job
-    }, job.duration);
   }
 }
 
-// Usage Example
-const myQueue = new JobQueue(2); // Max 2 concurrent workers
+setInterval(checkUptime, 30000);
+checkUptime(); // Initial check on startup
 
-myQueue.add({ id: 1, duration: 2000 });
-myQueue.add({ id: 2, duration: 1000 });
-myQueue.add({ id: 3, duration: 1500 });
-myQueue.add({ id: 4, duration: 500 });
+app.get('/api/health-dashboard', (req, res) => {
+  const report = {};
+  for (const [key, value] of serviceStatuses.entries()) {
+    report[key] = value;
+  }
+  res.json({ systemTime: new Date(), services: report });
+});
+
+app.listen(3000, () => console.log('Uptime Monitor running on http://localhost:3000'));
