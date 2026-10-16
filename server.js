@@ -1,40 +1,39 @@
-const fs = require('fs');
-const readline = require('readline');
-const path = require('path');
+const EventEmitter = require('events');
 
-async function processLargeCSV(filePath) {
-  if (!fs.existsSync(filePath)) {
-    console.log(`File not found: ${filePath}`);
-    return;
+class JobQueue extends EventEmitter {
+  constructor(concurrency = 2) {
+    super();
+    this.concurrency = concurrency;
+    this.running = 0;
+    this.queue = [];
   }
 
-  const fileStream = fs.createReadStream(filePath);
-  const rl = readline.createInterface({
-    input: fileStream,
-    crlfDelay: Infinity
-  });
+  add(jobData) {
+    this.queue.push(jobData);
+    this.process();
+  }
 
-  let rowCount = 0;
-  let headers = [];
-
-  for await (const line of rl) {
-    if (rowCount === 0) {
-      headers = line.split(',');
-      console.log('Detected Headers:', headers);
-    } else {
-      const values = line.split(',');
-      // Process each row record efficiently here
-      // e.g., insert into database batch or filter data
-      if (rowCount <= 5) {
-        console.log(`Row ${rowCount}:`, values);
-      }
+  process() {
+    if (this.running >= this.concurrency || this.queue.length === 0) {
+      return;
     }
-    rowCount++;
-  }
 
-  console.log(`Processing complete! Total rows parsed: ${rowCount - 1}`);
+    const job = this.queue.shift();
+    this.running++;
+
+    // Simulate async background task (e.g., sending email, video encoding)
+    setTimeout(() => {
+      console.log(`[Job Completed] Processed task ID: ${job.id}`);
+      this.running--;
+      this.process(); // Pick next job
+    }, job.duration);
+  }
 }
 
-// Run script with a sample file path passed via command line
-const targetFile = process.argv[2] || path.join(__dirname, 'data.csv');
-processLargeCSV(targetFile);
+// Usage Example
+const myQueue = new JobQueue(2); // Max 2 concurrent workers
+
+myQueue.add({ id: 1, duration: 2000 });
+myQueue.add({ id: 2, duration: 1000 });
+myQueue.add({ id: 3, duration: 1500 });
+myQueue.add({ id: 4, duration: 500 });
