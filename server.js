@@ -1,40 +1,40 @@
-const express = require('express');
-const crypto = require('crypto');
-const app = express();
+const fs = require('fs');
+const readline = require('readline');
+const path = require('path');
 
-// Capture raw request body as buffer to ensure accurate signature verification
-app.use(express.json({
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
-  }
-}));
-
-const WEBHOOK_SECRET = 'your_super_secret_webhook_key';
-
-app.post('/api/webhook', (req, res) => {
-  const signature = req.headers['x-signature'];
-  if (!signature) {
-    return res.status(401).json({ error: 'Missing x-signature header' });
+async function processLargeCSV(filePath) {
+  if (!fs.existsSync(filePath)) {
+    console.log(`File not found: ${filePath}`);
+    return;
   }
 
-  // Compute expected HMAC signature
-  const computedSignature = crypto
-    .createHmac('sha256', WEBHOOK_SECRET)
-    .update(req.rawBody)
-    .digest('hex');
+  const fileStream = fs.createReadStream(filePath);
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity
+  });
 
-  // Use timing-safe comparison to prevent timing attacks
-  const isValid = crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(computedSignature)
-  );
+  let rowCount = 0;
+  let headers = [];
 
-  if (!isValid) {
-    return res.status(403).json({ error: 'Invalid webhook signature' });
+  for await (const line of rl) {
+    if (rowCount === 0) {
+      headers = line.split(',');
+      console.log('Detected Headers:', headers);
+    } else {
+      const values = line.split(',');
+      // Process each row record efficiently here
+      // e.g., insert into database batch or filter data
+      if (rowCount <= 5) {
+        console.log(`Row ${rowCount}:`, values);
+      }
+    }
+    rowCount++;
   }
 
-  console.log('Verified Webhook Event Received:', req.body);
-  res.json({ status: 'success', message: 'Webhook verified and processed' });
-});
+  console.log(`Processing complete! Total rows parsed: ${rowCount - 1}`);
+}
 
-app.listen(3000, () => console.log('Webhook security receiver running on http://localhost:3000'));
+// Run script with a sample file path passed via command line
+const targetFile = process.argv[2] || path.join(__dirname, 'data.csv');
+processLargeCSV(targetFile);
