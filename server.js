@@ -1,46 +1,44 @@
 const express = require('express');
+const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 
-const monitoredServices = [
-  { name: 'Auth Service', url: 'https://httpbin.org/status/200' },
-  { name: 'Payment API', url: 'https://httpbin.org/status/500' }
-];
+// Mock database stores: apiKey -> { owner, tier, usageCount, limit }
+const apiKeysDb = new Map();
 
-const serviceStatuses = new Map();
+// Admin endpoint to generate a new key
+app.post('/api/admin/keys', (req, res) => {
+  const { owner, tier = 'free' } = req.body;
+  const apiKey = 'ak_' + crypto.randomBytes(16).toString('hex');
+  const limit = tier === 'pro' ? 10000 : 100;
 
-// Check services status every 30 seconds
-async function checkUptime() {
-  for (const service of monitoredServices) {
-    const startTime = Date.now();
-    try {
-      const response = await fetch(service.url);
-      const latency = Date.now() - startTime;
-      serviceStatuses.set(service.name, {
-        status: response.ok ? 'UP' : 'DOWN',
-        statusCode: response.status,
-        latencyMs: latency,
-        lastChecked: new Date().toISOString()
-      });
-    } catch (err) {
-      serviceStatuses.set(service.name, {
-        status: 'DOWN',
-        error: err.message,
-        lastChecked: new Date().toISOString()
-      });
-    }
-  }
-}
-
-setInterval(checkUptime, 30000);
-checkUptime(); // Initial check on startup
-
-app.get('/api/health-dashboard', (req, res) => {
-  const report = {};
-  for (const [key, value] of serviceStatuses.entries()) {
-    report[key] = value;
-  }
-  res.json({ systemTime: new Date(), services: report });
+  apiKeysDb.set(apiKey, { owner, tier, usageCount: 0, limit });
+  res.status(201).json({ apiKey, tier, limit });
 });
 
-app.listen(3000, () => console.log('Uptime Monitor running on http://localhost:3000'));
+// Middleware to enforce API key validity and quotas
+const verifyApiKeyAndQuota = (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || !apiKeysDb.has(apiKey)) {
+    return res.status(401).json({ error: 'Unauthorized: Missing or invalid API key' });
+  }
+
+  const clientData = apiKeysDb.get(apiKey);
+  if (clientData.usageCount >= clientData.limit) {
+    return res.status(429).json({ error: 'Quota exceeded. Upgrade your plan for higher limits.' });
+  }
+
+  clientData.usageCount++;
+  req.client = clientData;
+  next();
+};
+
+app.get('/api/data', verifyApiKeyAndQuota, (req, res) => {
+  res.json({
+    message: 'Welcome to the protected data endpoint!',
+    tier: req.client.tier,
+    remainingQuota: req.client.limit - req.client.usageCount
+  });
+});
+
+app.listen(3000, () => console.log('API Key Manager running on http://localhost:3000'));
