@@ -1,44 +1,61 @@
-const express = require('express');
-const crypto = require('crypto');
+const express = require("express");
 const app = express();
+
 app.use(express.json());
 
-// Mock database stores: apiKey -> { owner, tier, usageCount, limit }
-const apiKeysDb = new Map();
+let tasks = [
+  { id: 1, title: "Learn Node.js", completed: false },
+  { id: 2, title: "Build an ESP32 dashboard", completed: false },
+];
 
-// Admin endpoint to generate a new key
-app.post('/api/admin/keys', (req, res) => {
-  const { owner, tier = 'free' } = req.body;
-  const apiKey = 'ak_' + crypto.randomBytes(16).toString('hex');
-  const limit = tier === 'pro' ? 10000 : 100;
-
-  apiKeysDb.set(apiKey, { owner, tier, usageCount: 0, limit });
-  res.status(201).json({ apiKey, tier, limit });
+// Get all tasks
+app.get("/api/tasks", (req, res) => {
+  res.json(tasks);
 });
 
-// Middleware to enforce API key validity and quotas
-const verifyApiKeyAndQuota = (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey || !apiKeysDb.has(apiKey)) {
-    return res.status(401).json({ error: 'Unauthorized: Missing or invalid API key' });
+// Create task
+app.post("/api/tasks", (req, res) => {
+  const { title } = req.body;
+
+  if (!title) {
+    return res.status(400).json({ error: "Title is required" });
   }
 
-  const clientData = apiKeysDb.get(apiKey);
-  if (clientData.usageCount >= clientData.limit) {
-    return res.status(429).json({ error: 'Quota exceeded. Upgrade your plan for higher limits.' });
-  }
+  const task = {
+    id: tasks.length ? Math.max(...tasks.map(t => t.id)) + 1 : 1,
+    title,
+    completed: false,
+  };
 
-  clientData.usageCount++;
-  req.client = clientData;
-  next();
-};
-
-app.get('/api/data', verifyApiKeyAndQuota, (req, res) => {
-  res.json({
-    message: 'Welcome to the protected data endpoint!',
-    tier: req.client.tier,
-    remainingQuota: req.client.limit - req.client.usageCount
-  });
+  tasks.push(task);
+  res.status(201).json(task);
 });
 
-app.listen(3000, () => console.log('API Key Manager running on http://localhost:3000'));
+// Update task
+app.put("/api/tasks/:id", (req, res) => {
+  const task = tasks.find(t => t.id === Number(req.params.id));
+
+  if (!task) {
+    return res.status(404).json({ error: "Task not found" });
+  }
+
+  task.title = req.body.title ?? task.title;
+  task.completed = req.body.completed ?? task.completed;
+
+  res.json(task);
+});
+
+// Delete task
+app.delete("/api/tasks/:id", (req, res) => {
+  const exists = tasks.some(t => t.id === Number(req.params.id));
+
+  if (!exists) {
+    return res.status(404).json({ error: "Task not found" });
+  }
+
+  tasks = tasks.filter(t => t.id !== Number(req.params.id));
+  res.status(204).send();
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Task API running on http://localhost:${PORT}`));
