@@ -1,64 +1,39 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const path = require("path");
+require("dotenv").config();
+const axios = require("axios");
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
+const city = process.argv[2];
 
-app.use(express.static(path.join(__dirname, "public")));
+if (!city) {
+  console.log("Usage: node weather.js <city>");
+  process.exit(1);
+}
 
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+async function getWeather(city) {
+  try {
+    const response = await axios.get(
+      "https://api.openweathermap.org/data/2.5/weather",
+      {
+        params: {
+          q: city,
+          appid: process.env.OPENWEATHER_API_KEY,
+          units: "metric",
+        },
+      }
+    );
 
-  socket.on("chat message", ({ username, message }) => {
-    if (!username || !message) return;
+    const { name, main, weather } = response.data;
 
-    io.emit("chat message", {
-      username,
-      message,
-      time: new Date().toLocaleTimeString(),
-    });
-  });
+    console.log(`Weather in ${name}`);
+    console.log(`Temperature: ${main.temp}°C`);
+    console.log(`Feels like: ${main.feels_like}°C`);
+    console.log(`Condition: ${weather[0].description}`);
+  } catch (error) {
+    if (error.response?.status === 404) {
+      console.log("City not found.");
+    } else {
+      console.log("Failed to fetch weather:", error.message);
+    }
+  }
+}
 
-  socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-  });
-});
-
-server.listen(3000, () => {
-  console.log("Chat app running on http://localhost:3000");
-});
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const path = require("path");
-
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
-
-app.use(express.static(path.join(__dirname, "public")));
-
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-
-  socket.on("chat message", ({ username, message }) => {
-    if (!username || !message) return;
-
-    io.emit("chat message", {
-      username,
-      message,
-      time: new Date().toLocaleTimeString(),
-    });
-  });
-
-  socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-  });
-});
-
-server.listen(3000, () => {
-  console.log("Chat app running on http://localhost:3000");
-});
+getWeather(city);
