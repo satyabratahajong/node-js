@@ -1,61 +1,32 @@
 const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const path = require("path");
+
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-let tasks = [
-  { id: 1, title: "Learn Node.js", completed: false },
-  { id: 2, title: "Build an ESP32 dashboard", completed: false },
-];
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
 
-// Get all tasks
-app.get("/api/tasks", (req, res) => {
-  res.json(tasks);
+  socket.on("chat message", ({ username, message }) => {
+    if (!username || !message) return;
+
+    io.emit("chat message", {
+      username,
+      message,
+      time: new Date().toLocaleTimeString(),
+    });
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
 });
 
-// Create task
-app.post("/api/tasks", (req, res) => {
-  const { title } = req.body;
-
-  if (!title) {
-    return res.status(400).json({ error: "Title is required" });
-  }
-
-  const task = {
-    id: tasks.length ? Math.max(...tasks.map(t => t.id)) + 1 : 1,
-    title,
-    completed: false,
-  };
-
-  tasks.push(task);
-  res.status(201).json(task);
+server.listen(3000, () => {
+  console.log("Chat app running on http://localhost:3000");
 });
-
-// Update task
-app.put("/api/tasks/:id", (req, res) => {
-  const task = tasks.find(t => t.id === Number(req.params.id));
-
-  if (!task) {
-    return res.status(404).json({ error: "Task not found" });
-  }
-
-  task.title = req.body.title ?? task.title;
-  task.completed = req.body.completed ?? task.completed;
-
-  res.json(task);
-});
-
-// Delete task
-app.delete("/api/tasks/:id", (req, res) => {
-  const exists = tasks.some(t => t.id === Number(req.params.id));
-
-  if (!exists) {
-    return res.status(404).json({ error: "Task not found" });
-  }
-
-  tasks = tasks.filter(t => t.id !== Number(req.params.id));
-  res.status(204).send();
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Task API running on http://localhost:${PORT}`));
