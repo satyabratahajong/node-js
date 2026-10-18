@@ -81,3 +81,83 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 module.exports = app;
+const ApiError = require("../utils/ApiError");
+
+const devices = new Map();
+const readings = new Map();
+
+function createDevice({ deviceId, name, location }) {
+  if (devices.has(deviceId)) {
+    throw new ApiError(409, `Device already exists: ${deviceId}`);
+  }
+
+  const device = {
+    deviceId,
+    name,
+    location: location || "Unknown",
+    createdAt: new Date().toISOString(),
+  };
+
+  devices.set(deviceId, device);
+  readings.set(deviceId, []);
+
+  return device;
+}
+
+function getAllDevices() {
+  return Array.from(devices.values());
+}
+
+function getDeviceById(deviceId) {
+  const device = devices.get(deviceId);
+
+  if (!device) {
+    throw new ApiError(404, `Device not found: ${deviceId}`);
+  }
+
+  return device;
+}
+
+function addReading(deviceId, { temperature, humidity }) {
+  getDeviceById(deviceId);
+
+  const reading = {
+    temperature,
+    humidity,
+    timestamp: new Date().toISOString(),
+  };
+
+  const deviceReadings = readings.get(deviceId);
+  deviceReadings.push(reading);
+
+  if (deviceReadings.length > 100) {
+    deviceReadings.shift();
+  }
+
+  return reading;
+}
+
+function getReadings(deviceId) {
+  getDeviceById(deviceId);
+
+  return readings.get(deviceId);
+}
+
+function getLatestReading(deviceId) {
+  const deviceReadings = getReadings(deviceId);
+
+  if (!deviceReadings.length) {
+    throw new ApiError(404, `No readings found for device: ${deviceId}`);
+  }
+
+  return deviceReadings[deviceReadings.length - 1];
+}
+
+module.exports = {
+  createDevice,
+  getAllDevices,
+  getDeviceById,
+  addReading,
+  getReadings,
+  getLatestReading,
+};
