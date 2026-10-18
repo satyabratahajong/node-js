@@ -161,3 +161,48 @@ module.exports = {
   getReadings,
   getLatestReading,
 };
+
+function validateDeviceRegistration(req, res, next) {
+  const { deviceId, name } = req.body;
+
+  if (!deviceId || typeof deviceId !== "string") {
+    return res.status(400).json({
+      success: false,
+      error: "deviceId is required and must be a string",
+    });
+  }
+
+  if (!name || typeof name !== "string") {
+    return res.status(400).json({
+      success: false,
+      error: "name is required and must be a string",
+    });
+  }
+
+  next();
+}
+
+function validateReading(req, res, next) {
+  const { temperature, humidity } = req.body;
+
+  if (typeof temperature !== "number" || Number.isNaN(temperature)) {
+    return res.status(400).json({
+      success: false,
+      error: "temperature is required and must be a number",
+    });
+  }
+
+  if (typeof humidity !== "number" || Number.isNaN(humidity)) {
+    return res.status(400).json({
+      success: false,
+      error: "humidity is required and must be a number",
+    });
+  }
+
+  next();
+}
+
+module.exports = {
+  validateDeviceRegistration,
+  validateReading,
+};
