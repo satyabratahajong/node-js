@@ -32,3 +32,32 @@ class ApiError extends Error {
 }
 
 module.exports = ApiError;
+
+const env = require("../config/env");
+
+function notFoundHandler(req, res, next) {
+  res.status(404).json({
+    success: false,
+    error: `Route not found: ${req.method} ${req.originalUrl}`,
+  });
+}
+
+function errorHandler(err, req, res, next) {
+  const statusCode = err.statusCode || 500;
+  const message =
+    statusCode === 500 && env.nodeEnv === "production"
+      ? "Internal server error"
+      : err.message || "Internal server error";
+
+  console.error(`[ERROR] ${statusCode}: ${message}`);
+
+  res.status(statusCode).json({
+    success: false,
+    error: message,
+  });
+}
+
+module.exports = {
+  notFoundHandler,
+  errorHandler,
+};
