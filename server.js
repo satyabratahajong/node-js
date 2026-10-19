@@ -62,24 +62,6 @@ module.exports = {
   errorHandler,
 };
 
-const express = require("express");
-
-const { notFoundHandler, errorHandler } = require("./middleware/errorHandler");
-
-
-app.use(express.json());
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "IoT Device Monitoring API",
-    time: new Date().toISOString(),
-  });
-});
-
-app.use(notFoundHandler);
-app.use(errorHandler);
-
 module.exports = app;
 const ApiError = require("../utils/ApiError");
 
