@@ -6,3 +6,24 @@ const env = {
 };
 
 module.exports = env;
+const books = [];
+const members = [];
+const borrowRecords = [];
+
+function getBooks() {
+  return books;
+}
+
+function getMembers() {
+  return members;
+}
+
+function getBorrowRecords() {
+  return borrowRecords;
+}
+
+module.exports = {
+  getBooks,
+  getMembers,
+  getBorrowRecords,
+};
