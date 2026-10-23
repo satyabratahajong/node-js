@@ -27,3 +27,19 @@ module.exports = {
   getMembers,
   getBorrowRecords,
 };
+
+const express = require("express");
+
+const app = express();
+
+app.use(express.json());
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    success: true,
+    service: "Library Book Borrowing API",
+    time: new Date().toISOString(),
+  });
+});
+
+module.exports = app;
