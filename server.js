@@ -43,3 +43,10 @@ app.get("/api/health", (req, res) => {
 });
 
 module.exports = app;
+
+const app = require("./app");
+const env = require("./config/env");
+
+app.listen(env.port, () => {
+  console.log(`Library API running on port ${env.port}`);
+});
