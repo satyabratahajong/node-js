@@ -229,3 +229,27 @@ module.exports = {
   returnBook,
   getBorrowRecords,
 };
+
+function validateBorrowRequest(req, res, next) {
+  const { bookId, memberId } = req.body;
+
+  if (!bookId || typeof bookId !== "string") {
+    return res.status(400).json({
+      success: false,
+      error: "bookId is required and must be a string",
+    });
+  }
+
+  if (!memberId || typeof memberId !== "string") {
+    return res.status(400).json({
+      success: false,
+      error: "memberId is required and must be a string",
+    });
+  }
+
+  next();
+}
+
+module.exports = {
+  validateBorrowRequest,
+};
