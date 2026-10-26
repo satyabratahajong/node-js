@@ -131,3 +131,101 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 module.exports = app;
+
+const { v4: uuid } = require("uuid");
+const ApiError = require("../utils/ApiError");
+const store = require("../data/store");
+const bookService = require("./bookService");
+const memberService = require("./memberService");
+
+const MAX_BOOKS_PER_MEMBER = 3;
+const LOAN_DAYS = 14;
+
+function borrowBook({ bookId, memberId }) {
+  const book = bookService.getBookById(bookId);
+  const member = memberService.getMemberById(memberId);
+
+  const records = store.getBorrowRecords();
+
+  const activeLoans = records.filter(
+    (record) =>
+      record.memberId === memberId &&
+      record.status === "BORROWED"
+  );
+
+  if (activeLoans.length >= MAX_BOOKS_PER_MEMBER) {
+    throw new ApiError(
+      400,
+      `Member cannot borrow more than ${MAX_BOOKS_PER_MEMBER} books`
+    );
+  }
+
+  const alreadyBorrowed = activeLoans.some(
+    (record) => record.bookId === bookId
+  );
+
+  if (alreadyBorrowed) {
+    throw new ApiError(400, "Member has already borrowed this book");
+  }
+
+  if (book.availableCopies <= 0) {
+    throw new ApiError(409, "No copies available for this book");
+  }
+
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + LOAN_DAYS);
+
+  const record = {
+    id: uuid(),
+    bookId,
+    memberId,
+    bookTitle: book.title,
+    memberName: member.name,
+    borrowedAt: new Date().toISOString(),
+    dueDate: dueDate.toISOString(),
+    returnedAt: null,
+    status: "BORROWED",
+  };
+
+  book.availableCopies -= 1;
+  records.push(record);
+
+  return record;
+}
+
+function returnBook(recordId) {
+  const records = store.getBorrowRecords();
+
+  const record = records.find((item) => item.id === recordId);
+
+  if (!record) {
+    throw new ApiError(404, `Borrow record not found: ${recordId}`);
+  }
+
+  if (record.status === "RETURNED") {
+    throw new ApiError(400, "Book has already been returned");
+  }
+
+  const book = bookService.getBookById(record.bookId);
+  book.availableCopies += 1;
+
+  record.returnedAt = new Date().toISOString();
+  record.status = "RETURNED";
+
+  const isLate = new Date(record.returnedAt) > new Date(record.dueDate);
+
+  return {
+    ...record,
+    late: isLate,
+  };
+}
+
+function getBorrowRecords() {
+  return store.getBorrowRecords();
+}
+
+module.exports = {
+  borrowBook,
+  returnBook,
+  getBorrowRecords,
+};
