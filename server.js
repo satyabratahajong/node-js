@@ -252,4 +252,45 @@ function validateBorrowRequest(req, res, next) {
 
 module.exports = {
   validateBorrowRequest,
-};
+}; 
+
+const { v4: uuid } = require("uuid");
+const ApiError = require("../utils/ApiError");
+const store = require("../data/store");
+
+function createMember({ name, email }) {
+  const members = store.getMembers();
+
+  const exists = members.some(
+    (member) => member.email.toLowerCase() === email.toLowerCase()
+  );
+
+  if (exists) {
+    throw new ApiError(409, `Member already exists: ${email}`);
+  }
+
+  const member = {
+    id: uuid(),
+    name,
+    email,
+    joinedAt: new Date().toISOString(),
+  };
+
+  members.push(member);
+
+  return member;
+}
+
+function getMembers() {
+  return store.getMembers();
+}
+
+function getMemberById(id) {
+  const member = store.getMembers().find((member) => member.id === id);
+
+  if (!member) {
+    throw new ApiError(404, `Member not found: ${id}`);
+  }
+
+  return member;
+}
