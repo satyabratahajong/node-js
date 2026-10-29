@@ -293,18 +293,6 @@ function getMemberById(id) {
   }
 
   return member;
-}
-const borrowService = require("../services/borrowService");
-
-async function borrowBook(req, res, next) {
-  try {
-    const record = await borrowService.borrowBook(req.body);
-
-    res.status(201).json({ success: true, data: record });
-  } catch (error) {
-    next(error);
-  }
-}
 
 async function returnBook(req, res, next) {
   try {
@@ -315,23 +303,4 @@ async function returnBook(req, res, next) {
     next(error);
   }
 }
-
-async function getBorrowRecords(req, res, next) {
-  try {
-    const records = await borrowService.getBorrowRecords();
-
-    res.json({
-      success: true,
-      count: records.length,
-      data: records,
-    });
-  } catch (error) {
-    next(error);
-  }
 }
-
-module.exports = {
-  borrowBook,
-  returnBook,
-  getBorrowRecords,
-};
