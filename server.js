@@ -63,7 +63,6 @@ class ApiError extends Error {
 
 module.exports = ApiError;
 
-const env = require("../config/env");
 
 function notFoundHandler(req, res) {
   res.status(404).json({
@@ -111,21 +110,6 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 module.exports = app;
-
-const express = require("express");
-
-const { notFoundHandler, errorHandler } = require("./middleware/errorHandler");
-
-
-app.use(express.json());
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    success: true,
-    service: "Library Book Borrowing API",
-    time: new Date().toISOString(),
-  });
-});
 
 app.use(notFoundHandler);
 app.use(errorHandler);
