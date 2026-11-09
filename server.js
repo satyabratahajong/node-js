@@ -116,15 +116,6 @@ app.use(errorHandler);
 
 module.exports = app;
 
-const { v4: uuid } = require("uuid");
-const ApiError = require("../utils/ApiError");
-const store = require("../data/store");
-const bookService = require("./bookService");
-const memberService = require("./memberService");
-
-const MAX_BOOKS_PER_MEMBER = 3;
-const LOAN_DAYS = 14;
-
 function borrowBook({ bookId, memberId }) {
   const book = bookService.getBookById(bookId);
   const member = memberService.getMemberById(memberId);
